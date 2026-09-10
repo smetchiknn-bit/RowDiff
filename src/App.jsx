@@ -14,7 +14,6 @@ const LockIcon = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="non
 const SheetIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
 const ArrowRightIcon = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
 const RefreshIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-const AlertIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
 
 export default function App() {
   const [step, setStep] = useState(1)
@@ -110,7 +109,7 @@ export default function App() {
 
   const authenticate = () => {
     if (!gisReady || !gapiReady) {
-      setError("Сервисы Google еще не загрузились. Подождите пару секунд.")
+      setError("Сервисы Google еще не загружены. Подождите пару секунд.")
       return
     }
 
@@ -123,7 +122,6 @@ export default function App() {
           return
         }
         setAccessToken(response.access_token)
-        // Явно устанавливаем токен для gapi
         window.gapi.client.setToken({ access_token: response.access_token })
         
         loadFolders()
@@ -146,7 +144,6 @@ export default function App() {
       if (data.error) throw new Error(data.error.message)
       
       const files = data.files || []
-      // Фильтруем только корневые папки
       const rootFolders = files.filter(f => !f.parents || f.parents.length === 0 || f.parents[0] === 'root')
       setFolders(rootFolders)
     } catch (err) {
@@ -182,7 +179,7 @@ export default function App() {
         }) 
       })
 
-      // Проверяем статус ответа, чтобы увидеть детали ошибки
+      // Проверяем статус ответа
       if (!createRes.ok) {
         const errorData = await createRes.json()
         throw new Error(errorData.error?.message || `HTTP error ${createRes.status}`)
@@ -190,7 +187,6 @@ export default function App() {
 
       const createData = await createRes.json()
       const spreadsheetId = createData.spreadsheetId
-      // Берем ID листа из ответа, а не угадываем
       const firstSheetId = createData.sheets[0].properties.sheetId
 
       // 2. Перемещаем в папку (если выбрана не корень)
@@ -202,18 +198,14 @@ export default function App() {
             headers: { Authorization: `Bearer ${accessToken}` }
           }
         )
-        // Примечание: Параметр removeParents=root иногда вызывает ошибки,
-        // поэтому мы его убрали. Google Drive сам обновит родителя.
-        if (!moveRes.ok) {
-          const moveData = await moveRes.json()
-          console.warn("Move warning:", moveData.error?.message)
-        }
+        const moveData = await moveRes.json()
+        if (moveData.error) console.warn("Move warning:", moveData.error)
       }
 
       // 3. Заполняем данными (только первый лист для стабильности)
       if (excelData && excelData.sheets.length > 0 && excelData.sheets[0].data.length > 0) {
         const sheet = excelData.sheets[0]
-        const maxCols = Math.max(...sheet.data.map(r => (r.length || 1)))
+        const maxCols = Math.max(...sheet.data.map(r => r.length || 1))
         
         const requestBody = {
           requests: [{
@@ -246,12 +238,8 @@ export default function App() {
             body: JSON.stringify(requestBody)
           }
         )
-
-        // Проверяем, что запрос на обновление тоже прошел успешно
-        if (!updateRes.ok) {
-          const updateError = await updateRes.json()
-          console.warn("Update warning:", updateError.error?.message)
-        }
+        const updateData = await updateRes.json()
+        if (updateData.error) console.warn("Update warning:", updateData.error)
       }
 
       setResult({
@@ -262,8 +250,7 @@ export default function App() {
       setStep(4)
     } catch (err) {
       console.error("Create Error:", err)
-      // Выводим более понятное сообщение об ошибке
-      setError("Ошибка создания: " + (err.message || "Неизвестная ошибка"))
+      setError("Ошибка создания: " + err.message)
     } finally {
       setIsCreating(false)
     }
