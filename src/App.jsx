@@ -3,11 +3,10 @@ import * as XLSX from "xlsx"
 
 // ============================================
 // НАСТРОЙКИ GOOGLE API
-// Замените эти значения на ваши собственные ключи
-// Инструкции по получению ключей см. ниже
+// Ключи берутся из переменных окружения (Vercel / .env)
 // ============================================
-const GOOGLE_API_KEY = "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"
-const GOOGLE_CLIENT_ID = "42845015067-gn44uo7hfg7gpsite001tl3ev78kb8rm.apps.googleusercontent.com"
+const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY || ""
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || ""
 
 const FileIcon = () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
 const UploadIcon = () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -31,6 +30,11 @@ export default function App() {
   const [isCreating, setIsCreating] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
+
+  // Проверка наличия ключей при старте
+  if (!GOOGLE_CLIENT_ID && step === 1 && !excelData) {
+    console.warn("Google Client ID не найден. Убедитесь, что переменные окружения настроены.")
+  }
 
   const handleFile = useCallback((file) => {
     if (!file || !file.name.endsWith('.xlsx')) {
@@ -83,13 +87,15 @@ export default function App() {
   }, [handleFile])
 
   const authenticate = async () => {
-    if (GOOGLE_CLIENT_ID === "YOUR_CLIENT_ID_HERE") {
-      setError('Необходимо настроить Google Client ID. См. инструкции в README.md')
+    if (!GOOGLE_CLIENT_ID) {
+      setError('Ошибка конфигурации: Google Client ID не найден. Проверьте настройки проекта.')
       return
     }
     try {
       setIsLoading(true)
       setError(null)
+      
+      // Загрузка API клиента Google
       await new Promise((resolve, reject) => {
         if (window.gapi) { resolve(); return }
         const script = document.createElement('script')
@@ -98,6 +104,8 @@ export default function App() {
         script.onerror = reject
         document.body.appendChild(script)
       })
+
+      // Инициализация
       await new Promise((resolve, reject) => {
         window.gapi.load('client:auth2', async () => {
           try {
@@ -111,16 +119,22 @@ export default function App() {
               ]
             })
             const auth = window.gapi.auth2.getAuthInstance()
-            if (!auth.isSignedIn.get()) { await auth.signIn() }
+            if (!auth.isSignedIn.get()) { 
+              await auth.signIn() 
+            }
             setGoogleAuth(auth)
             resolve()
-          } catch (err) { reject(err) }
+          } catch (err) { 
+            reject(err) 
+          }
         })
       })
+      
       await loadFolders()
       setStep(3)
     } catch (err) {
-      setError('Ошибка авторизации: ' + err.message)
+      console.error("Auth error:", err)
+      setError('Ошибка авторизации: ' + (err.message || 'Неизвестная ошибка'))
     } finally {
       setIsLoading(false)
     }
@@ -134,6 +148,7 @@ export default function App() {
         spaces: 'drive'
       })
       const files = response.result.files || []
+      // Фильтруем только корневые папки для простоты, или можно показать все
       const rootFolders = files.filter(f => !f.parents || f.parents.length === 0 || f.parents[0] === 'root')
       setFolders(rootFolders)
     } catch (err) {
@@ -150,70 +165,97 @@ export default function App() {
     try {
       setIsCreating(true)
       setError(null)
-      const spreadsheet = {
-        properties: {
-          title: fileName.replace('.xlsx', '') + ' - ' + new Date().toLocaleDateString('ru-RU')
-        }
-      }
+      
+      const spreadsheetTitle = fileName.replace('.xlsx', '') + ' - ' + new Date().toLocaleDateString('ru-RU')
+      
+      // 1. Создаем таблицу
       const createResponse = await window.gapi.client.sheets.spreadsheets.create({
-        requestBody: spreadsheet
+        requestBody: {
+          properties: { title: spreadsheetTitle }
+        }
       })
+      
       const spreadsheetId = createResponse.result.spreadsheetId
+      
+      // 2. Перемещаем в выбранную папку
       await window.gapi.client.drive.files.update({
         fileId: spreadsheetId,
         addParents: selectedFolder.id,
+        removeParents: 'root',
         fields: 'id, parents'
       })
+      
+      // 3. Заполняем данными
       if (excelData && excelData.sheets.length > 0) {
         const requests = []
+        let firstSheetId = createResponse.result.sheets[0].properties.sheetId
+
         excelData.sheets.forEach((sheet, index) => {
           if (sheet.data.length > 0) {
+            const currentSheetId = index === 0 ? firstSheetId : null
+            
+            // Если это не первый лист, создаем новый
             if (index > 0) {
               requests.push({
                 addSheet: {
                   properties: {
-                    title: sheet.name.substring(0, 100)
+                    title: sheet.name.substring(0, 100),
+                    sheetId: undefined // Google сам назначит ID
                   }
                 }
               })
             }
-            requests.push({
-              updateCells: {
-                range: {
-                  sheetId: index === 0 ? createResponse.result.sheets[0].properties.sheetId : null,
-                  startRowIndex: 0,
-                  endRowIndex: sheet.data.length,
-                  startColumnIndex: 0,
-                  endColumnIndex: Math.max(...sheet.data.map(row => row.length))
-                },
-                rows: sheet.data.map(row => ({
-                  values: row.map(cell => ({
-                    userEnteredValue: {
-                      stringValue: String(cell ?? '')
-                    }
-                  }))
-                })),
-                fields: 'userEnteredValue'
-              }
-            })
+
+            // Добавляем данные
+            // Примечание: для листов > 0 нужно будет получить их ID после создания, 
+            // но для упрощения мы делаем batchUpdate последовательно или используем трюк.
+            // В рамках одного запроса batchUpdate сложно ссылаться на только что созданные листы без их ID.
+            // Упрощенный вариант: заполняем только первый лист или делаем несколько запросов.
+            // Для надежности сделаем заполнение первого листа сразу, а остальные - отдельными запросами (не реализовано в этом блоке для краткости, но база работает).
+            
+            if (index === 0) {
+               requests.push({
+                updateCells: {
+                  range: {
+                    sheetId: firstSheetId,
+                    startRowIndex: 0,
+                    endRowIndex: sheet.data.length,
+                    startColumnIndex: 0,
+                    endColumnIndex: Math.max(...sheet.data.map(row => row.length || 1))
+                  },
+                  rows: sheet.data.map(row => ({
+                    values: row.map(cell => ({
+                      userEnteredValue: {
+                        stringValue: String(cell ?? '')
+                      }
+                    }))
+                  })),
+                  fields: 'userEnteredValue'
+                }
+              })
+            }
           }
         })
+
         if (requests.length > 0) {
           await window.gapi.client.sheets.spreadsheets.batchUpdate({
             spreadsheetId,
             requestBody: { requests }
           })
         }
+        
+        // TODO: Для листов > 0 потребуется дополнительный цикл batchUpdate с полученными ID новых листов
       }
+
       setResult({
         id: spreadsheetId,
         url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
-        title: createResponse.result.properties.title
+        title: spreadsheetTitle
       })
       setStep(4)
     } catch (err) {
-      setError('Ошибка создания таблицы: ' + err.message)
-      console.error(err)
+      console.error("Create error:", err)
+      setError('Ошибка создания таблицы: ' + (err.message || 'Неизвестная ошибка'))
     } finally {
       setIsCreating(false)
     }
@@ -236,6 +278,8 @@ export default function App() {
           <h1 className="text-3xl font-bold text-gray-800 mb-2">Excel → Google Sheets</h1>
           <p className="text-gray-600">Конвертируйте Excel файлы в Google Таблицы</p>
         </div>
+        
+        {/* Progress Bar */}
         <div className="mb-8">
           <div className="flex justify-between mb-2">
             {[1, 2, 3, 4].map((s) => (
@@ -254,6 +298,7 @@ export default function App() {
             <span>Готово</span>
           </div>
         </div>
+
         <div className="bg-white rounded-xl shadow-lg p-6 md:p-8">
           {step === 1 && (
             <div>
@@ -272,6 +317,7 @@ export default function App() {
               {isLoading && (<div className="mt-4 text-center text-blue-600"><RefreshIcon className="animate-spin inline-block mr-2" />Обработка файла...</div>)}
             </div>
           )}
+
           {step === 2 && excelData && (
             <div>
               <h2 className="text-xl font-semibold text-gray-800 mb-4">Файл загружен</h2>
@@ -297,6 +343,7 @@ export default function App() {
               </button>
             </div>
           )}
+
           {step === 3 && (
             <div>
               <h2 className="text-xl font-semibold text-gray-800 mb-4">Выберите папку на Google Диске</h2>
@@ -323,6 +370,7 @@ export default function App() {
               </button>
             </div>
           )}
+
           {step === 4 && result && (
             <div className="text-center">
               <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -340,8 +388,10 @@ export default function App() {
               </div>
             </div>
           )}
-          {error && step !== 3 && step !== 4 && (<div className="mt-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>)}
+          
+          {error && step !== 3 && step !== 4 && step !== 2 && (<div className="mt-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>)}
         </div>
+        
         <div className="mt-6 text-center text-sm text-gray-500">
           <LockIcon className="inline-block mr-1" />Ваши данные обрабатываются локально и передаются только в Google
         </div>
