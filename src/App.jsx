@@ -56,7 +56,7 @@ export default function App() {
         })
       }
 
-      // Инициализация GAPI клиента (без discoveryDocs сразу, чтобы избежать гонок)
+      // Инициализация GAPI клиента
       try {
         await window.gapi.client.init({
           apiKey: GOOGLE_API_KEY,
@@ -110,7 +110,7 @@ export default function App() {
 
   const authenticate = () => {
     if (!gisReady || !gapiReady) {
-      setError("Сервисы Google еще не загрулись. Подождите пару секунд.")
+      setError("Сервисы Google еще не загрузились. Подождите пару секунд.")
       return
     }
 
@@ -136,7 +136,6 @@ export default function App() {
 
   const loadFolders = async () => {
     try {
-      // Используем fetch для надежности, так как gapi.client.drive может быть не готов
       const res = await fetch(
         `https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'+and+trashed=false&fields=files(id,name,parents)&spaces=drive`,
         {
@@ -169,39 +168,52 @@ export default function App() {
     const title = fileName.replace('.xlsx', '') + ' - ' + new Date().toLocaleDateString('ru-RU')
     
     try {
-      // 1. Создаем таблицу через fetch (гарантированная работа body)
+      // 1. Создаем таблицу с ПРАВИЛЬНОЙ структурой запроса
       const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ properties: { title } })
+        // ВАЖНО: Передаем не только свойства, но и массив sheets
+        body: JSON.stringify({ 
+          properties: { title },
+          sheets: [{ properties: { title: "Sheet1" } }] 
+        }) 
       })
-      
+
+      // Проверяем статус ответа, чтобы увидеть детали ошибки
+      if (!createRes.ok) {
+        const errorData = await createRes.json()
+        throw new Error(errorData.error?.message || `HTTP error ${createRes.status}`)
+      }
+
       const createData = await createRes.json()
-      if (createData.error) throw new Error(createData.error.message)
-      
       const spreadsheetId = createData.spreadsheetId
+      // Берем ID листа из ответа, а не угадываем
       const firstSheetId = createData.sheets[0].properties.sheetId
 
       // 2. Перемещаем в папку (если выбрана не корень)
       if (selectedFolder) {
         const moveRes = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&removeParents=root&fields=id,parents`,
+          `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
           {
             method: 'PATCH',
             headers: { Authorization: `Bearer ${accessToken}` }
           }
         )
-        const moveData = await moveRes.json()
-        if (moveData.error) console.warn("Move warning:", moveData.error)
+        // Примечание: Параметр removeParents=root иногда вызывает ошибки,
+        // поэтому мы его убрали. Google Drive сам обновит родителя.
+        if (!moveRes.ok) {
+          const moveData = await moveRes.json()
+          console.warn("Move warning:", moveData.error?.message)
+        }
       }
 
       // 3. Заполняем данными (только первый лист для стабильности)
       if (excelData && excelData.sheets.length > 0 && excelData.sheets[0].data.length > 0) {
         const sheet = excelData.sheets[0]
-        const maxCols = Math.max(...sheet.data.map(r => r.length || 1))
+        const maxCols = Math.max(...sheet.data.map(r => (r.length || 1)))
         
         const requestBody = {
           requests: [{
@@ -234,8 +246,12 @@ export default function App() {
             body: JSON.stringify(requestBody)
           }
         )
-        const updateData = await updateRes.json()
-        if (updateData.error) console.warn("Update warning:", updateData.error)
+
+        // Проверяем, что запрос на обновление тоже прошел успешно
+        if (!updateRes.ok) {
+          const updateError = await updateRes.json()
+          console.warn("Update warning:", updateError.error?.message)
+        }
       }
 
       setResult({
@@ -246,7 +262,8 @@ export default function App() {
       setStep(4)
     } catch (err) {
       console.error("Create Error:", err)
-      setError("Ошибка создания: " + err.message)
+      // Выводим более понятное сообщение об ошибке
+      setError("Ошибка создания: " + (err.message || "Неизвестная ошибка"))
     } finally {
       setIsCreating(false)
     }
