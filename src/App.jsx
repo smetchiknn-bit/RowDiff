@@ -3,6 +3,7 @@ import * as XLSX from "xlsx"
 
 // ============================================
 // НАСТРОЙКИ GOOGLE API
+// Ключи берутся из переменных окружения Vercel
 // ============================================
 const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY || ""
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || ""
@@ -25,76 +26,71 @@ export default function App() {
   const [fileName, setFileName] = useState("")
   const [isDragging, setIsDragging] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const [googleAuthLoaded, setGoogleAuthLoaded] = useState(false)
+  const [tokenClient, setTokenClient] = useState(null)
+  const [accessToken, setAccessToken] = useState(null)
   const [folders, setFolders] = useState([])
-  const [selectedFolder, setSelectedFolder] = useState(null)
+  const [selectedFolder, setSelectedFolder] = useState(null) // null = корень, объект = папка
   const [isCreating, setIsCreating] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
-  
-  // Состояния для API
-  const [gapiLoaded, setGapiLoaded] = useState(false)
-  const [gisLoaded, setGisLoaded] = useState(false)
-  const [tokenClient, setTokenClient] = useState(null)
-  const [accessToken, setAccessToken] = useState(null)
+  const [loadError, setLoadError] = useState(null)
 
-  // Загрузка скриптов Google при старте
+  // Проверка конфигурации при загрузке
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_API_KEY) {
+      console.error("КРИТИЧЕСКАЯ ОШИБКА: Отсутствуют ключи API.")
+    }
+  }, [])
+
+  // Загрузка скриптов Google
   useEffect(() => {
     const loadScripts = async () => {
-      // 1. Загрузка gapi (для Drive/Sheets API)
-      await new Promise((resolve, reject) => {
-        if (window.gapi) { resolve(); return }
-        const script = document.createElement('script')
-        script.src = 'https://apis.google.com/js/api.js'
-        script.onload = () => resolve()
-        script.onerror = () => reject(new Error("Failed to load gapi"))
-        document.body.appendChild(script)
-      })
+      try {
+        // 1. Загружаем gapi
+        await new Promise((resolve, reject) => {
+          if (window.gapi) { resolve(); return }
+          const script = document.createElement('script')
+          script.src = 'https://apis.google.com/js/api.js'
+          script.onload = () => window.gapi.load('client', resolve)
+          script.onerror = reject
+          document.body.appendChild(script)
+        })
 
-      // 2. Загрузка google.accounts (для Auth)
-      await new Promise((resolve, reject) => {
-        if (window.google && window.google.accounts) { resolve(); return }
-        const script = document.createElement('script')
-        script.src = 'https://accounts.google.com/gsi/client'
-        script.onload = () => resolve()
-        script.onerror = () => reject(new Error("Failed to load GIS"))
-        document.body.appendChild(script)
-      })
+        // 2. Загружаем Google Identity Services
+        await new Promise((resolve, reject) => {
+          if (window.google && window.google.accounts) { resolve(); return }
+          const script = document.createElement('script')
+          script.src = 'https://accounts.google.com/gsi/client'
+          script.onload = resolve
+          script.onerror = reject
+          document.body.appendChild(script)
+        })
 
-      // 3. Инициализация gapi client
-      window.gapi.load('client', () => {
-        window.gapi.client.init({
-          apiKey: GOOGLE_API_KEY,
-          discoveryDocs: [
-            'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
-            'https://sheets.googleapis.com/$discovery/rest?version=v4'
-          ]
-        }).then(() => {
-          setGapiLoaded(true)
-        }).catch(err => console.error("Gapi init error:", err))
-      })
-
-      // 4. Инициализация клиента токенов
-      if (window.google && window.google.accounts && GOOGLE_CLIENT_ID) {
+        // 3. Инициализируем токен-клиент
         const client = window.google.accounts.oauth2.initTokenClient({
           client_id: GOOGLE_CLIENT_ID,
           scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
           callback: (response) => {
             if (response.access_token) {
               setAccessToken(response.access_token)
-              // Токен получен, можно грузить папки если мы на шаге 3
-              if (step === 3 && !folders.length) loadFolders(response.access_token)
+              // Устанавливаем токен для gapi
+              window.gapi.client.setToken({ access_token: response.access_token })
             } else {
-              setError("Не удалось получить токен доступа")
+              setError('Ошибка получения токена доступа')
             }
           },
         })
         setTokenClient(client)
-        setGisLoaded(true)
+        setGoogleAuthLoaded(true)
+      } catch (err) {
+        console.error("Ошибка загрузки скриптов Google:", err)
+        setError("Не удалось загрузить компоненты Google. Проверьте соединение.")
       }
     }
 
-    loadScripts().catch(err => console.error(err))
-  }, []) // Пустой массив зависимостей - выполняется один раз при монтировании
+    loadScripts()
+  }, [])
 
   const handleFile = useCallback((file) => {
     if (!file || !file.name.endsWith('.xlsx')) {
@@ -124,103 +120,99 @@ export default function App() {
     reader.readAsArrayBuffer(file)
   }, [])
 
-  const onDragOver = useCallback((e) => { e.preventDefault(); setIsDragging(true) }, [])
-  const onDragLeave = useCallback((e) => { e.preventDefault(); setIsDragging(false) }, [])
+  const onDragOver = useCallback((e) => {
+    e.preventDefault()
+    setIsDragging(true)
+  }, [])
+
+  const onDragLeave = useCallback((e) => {
+    e.preventDefault()
+    setIsDragging(false)
+  }, [])
+
   const onDrop = useCallback((e) => {
     e.preventDefault()
     setIsDragging(false)
-    handleFile(e.dataTransfer.files[0])
+    const file = e.dataTransfer.files[0]
+    handleFile(file)
   }, [handleFile])
 
   const onFileInput = useCallback((e) => {
-    handleFile(e.target.files[0])
+    const file = e.target.files[0]
+    handleFile(file)
   }, [handleFile])
 
   const authenticate = () => {
     if (!tokenClient) {
-      setError("Клиент авторизации еще не готов. Подождите пару секунд.")
+      setError('Компоненты авторизации еще не загружены. Подождите немного...')
       return
     }
     setError(null)
-    // Запрашиваем токен. Если пользователь уже вошел, может не спрашивать пароль повторно
-    tokenClient.requestAccessToken({
-      prompt: 'consent' // Всегда спрашивать подтверждение, чтобы гарантировать свежий токен
-    })
+    // Запрос токена с повторной авторизацией, даже если уже входили
+    tokenClient.requestAccessToken({ prompt: 'consent' })
   }
 
-  // Эффект для перехода к шагу 3 после получения токена
+  // Эффект: когда появился токен, загружаем папки и переходим на шаг 3
   useEffect(() => {
-    if (accessToken && step === 2 && gapiLoaded) {
-      loadFolders(accessToken)
-      setStep(3)
+    if (accessToken && step === 2) {
+      loadFolders()
     }
-  }, [accessToken, gapiLoaded, step])
+  }, [accessToken, step])
 
-  const loadFolders = async (token) => {
-    const useToken = token || accessToken
-    if (!useToken) return
-
+  const loadFolders = async () => {
     try {
-      setIsLoading(true)
-      // Явно устанавливаем токен в gapi перед запросом
-      window.gapi.client.setToken({ access_token: useToken })
+      setLoadError(null)
+      // Инициализируем gapi клиент с нужными API
+      await window.gapi.client.load('https://www.googleapis.com/discovery/v1/apis/drive/v3/rest')
       
       const response = await window.gapi.client.drive.files.list({
         q: "mimeType='application/vnd.google-apps.folder' and trashed=false",
-        fields: 'files(id, name, parents)',
+        fields: 'files(id, name)',
         spaces: 'drive'
       })
       
       const files = response.result.files || []
-      // Фильтруем корневые папки
-      const rootFolders = files.filter(f => !f.parents || f.parents.length === 0 || f.parents[0] === 'root')
+      setFolders(files)
       
-      setFolders(rootFolders)
-      if (rootFolders.length === 0) {
-        // Это не ошибка, просто папок нет в корне
-        console.log("Папки не найдены в корне диска")
+      if (files.length === 0) {
+        setLoadError("Папки не найдены. Вы можете выбрать 'Мой диск' или создать папку на Google Диске.")
       }
+      
+      setStep(3)
     } catch (err) {
       console.error('Ошибка загрузки папок:', err)
-      setError('Не удалось загрузить папки: ' + (err.message || 'Проверьте консоль'))
-      setFolders([])
-    } finally {
-      setIsLoading(false)
+      setLoadError(`Ошибка: ${err.message || 'Не удалось загрузить список папок'}`)
+      // Не блокируем переход, пусть пользователь попробует снова
     }
   }
 
   const createGoogleSheet = async () => {
-    if (!selectedFolder) {
-      setError('Пожалуйста, выберите папку')
-      return
-    }
-    if (!accessToken) {
-      setError("Сессия истекла. Обновите страницу.")
-      return
-    }
-
     try {
       setIsCreating(true)
       setError(null)
-      window.gapi.client.setToken({ access_token: accessToken })
-
+      
       const spreadsheetTitle = fileName.replace('.xlsx', '') + ' - ' + new Date().toLocaleDateString('ru-RU')
       
-      // Создание
+      // 1. Создаем таблицу
       const createResponse = await window.gapi.client.sheets.spreadsheets.create({
-        requestBody: { properties: { title: spreadsheetTitle } }
+        requestBody: {
+          properties: { title: spreadsheetTitle }
+        }
       })
+      
       const spreadsheetId = createResponse.result.spreadsheetId
       
-      // Перемещение в папку
-      await window.gapi.client.drive.files.update({
-        fileId: spreadsheetId,
-        addParents: selectedFolder.id,
-        removeParents: 'root',
-        fields: 'id, parents'
-      })
+      // 2. Если выбрана папка, перемещаем туда. Если null (корень), оставляем в корне.
+      if (selectedFolder) {
+        await window.gapi.client.drive.files.update({
+          fileId: spreadsheetId,
+          addParents: selectedFolder.id,
+          removeParents: 'root',
+          fields: 'id, parents'
+        })
+      }
       
-      // Заполнение данными (первый лист)
+      // 3. Заполняем данными (первый лист)
       if (excelData && excelData.sheets.length > 0 && excelData.sheets[0].data.length > 0) {
         const sheet = excelData.sheets[0]
         const firstSheetId = createResponse.result.sheets[0].properties.sheetId
@@ -236,7 +228,9 @@ export default function App() {
             },
             rows: sheet.data.map(row => ({
               values: row.map(cell => ({
-                userEnteredValue: { stringValue: String(cell ?? '') }
+                userEnteredValue: {
+                  stringValue: String(cell ?? '')
+                }
               }))
             })),
             fields: 'userEnteredValue'
@@ -257,7 +251,7 @@ export default function App() {
       setStep(4)
     } catch (err) {
       console.error("Create error:", err)
-      setError('Ошибка создания: ' + (err.message || 'Неизвестная ошибка'))
+      setError('Ошибка создания таблицы: ' + (err.message || 'Неизвестная ошибка'))
     } finally {
       setIsCreating(false)
     }
@@ -271,9 +265,8 @@ export default function App() {
     setSelectedFolder(null)
     setResult(null)
     setError(null)
+    setLoadError(null)
     setAccessToken(null)
-    // Не сбрасываем токены полностью, чтобы не логиниться заново сразу, 
-    // но для полной очистки можно вызвать tokenClient.revokeAccessToken()
   }
 
   return (
@@ -297,14 +290,23 @@ export default function App() {
             <div className="h-full bg-blue-600 rounded-full transition-all duration-300" style={{ width: `${((step - 1) / 3) * 100}%` }} />
           </div>
           <div className="flex justify-between mt-2 text-xs text-gray-500">
-            <span>Загрузка</span><span>Проверка</span><span>Папка</span><span>Готово</span>
+            <span>Загрузка</span>
+            <span>Проверка</span>
+            <span>Папка</span>
+            <span>Готово</span>
           </div>
         </div>
 
         <div className="bg-white rounded-xl shadow-lg p-6 md:p-8">
           {(!GOOGLE_CLIENT_ID || !GOOGLE_API_KEY) && step === 1 && (
              <div className="mb-6 p-4 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-700 text-sm">
-               <div className="flex"><AlertIcon className="mr-2"/> Ключи API не найдены. Проверьте настройки Vercel.</div>
+               <div className="flex">
+                 <div className="flex-shrink-0"><AlertIcon /></div>
+                 <div className="ml-3">
+                   <p className="font-bold">Внимание: Ключи API не найдены</p>
+                   <p>Приложение работает в демо-режиме. Добавьте <code>VITE_GOOGLE_CLIENT_ID</code> и <code>VITE_GOOGLE_API_KEY</code> в переменные окружения Vercel.</p>
+                 </div>
+               </div>
              </div>
           )}
 
@@ -318,11 +320,11 @@ export default function App() {
                     <div className="mb-4 text-gray-400"><UploadIcon /></div>
                     <p className="text-lg font-medium text-gray-700 mb-2">Перетащите файл сюда</p>
                     <p className="text-sm text-gray-500 mb-4">или нажмите для выбора</p>
-                    <p className="text-xs text-gray-400">Только .xlsx</p>
+                    <p className="text-xs text-gray-400">Поддерживаются только файлы .xlsx</p>
                   </div>
                 </label>
               </div>
-              {isLoading && <div className="mt-4 text-center text-blue-600"><RefreshIcon className="animate-spin inline-block mr-2" />Обработка...</div>}
+              {isLoading && (<div className="mt-4 text-center text-blue-600"><RefreshIcon className="animate-spin inline-block mr-2" />Обработка файла...</div>)}
             </div>
           )}
 
@@ -330,25 +332,29 @@ export default function App() {
             <div>
               <h2 className="text-xl font-semibold text-gray-800 mb-4">Файл загружен</h2>
               <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                <div className="flex items-center mb-3"><FileIcon className="mr-3 text-blue-600" /><span className="font-medium text-gray-800">{fileName}</span></div>
+                <div className="flex items-center mb-3">
+                  <FileIcon className="mr-3 text-blue-600" />
+                  <span className="font-medium text-gray-800">{fileName}</span>
+                </div>
                 <div className="text-sm text-gray-600">
-                  <p className="mb-2">Листов: <strong>{excelData.sheets.length}</strong></p>
+                  <p className="mb-2">Найдено листов: <strong>{excelData.sheets.length}</strong></p>
                   <div className="flex flex-wrap gap-2">
                     {excelData.sheets.map((sheet, idx) => (
-                      <span key={idx} className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs flex items-center"><SheetIcon className="mr-1 w-3 h-3"/>{sheet.name}</span>
+                      <span key={idx} className="inline-flex items-center px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">
+                        <SheetIcon className="mr-1" />{sheet.name}
+                      </span>
                     ))}
                   </div>
                 </div>
               </div>
-              {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm border border-red-100">{error}</div>}
-              
-              {!gapiLoaded || !gisLoaded ? (
-                <button disabled className="w-full bg-gray-400 text-white font-medium py-3 px-4 rounded-lg cursor-not-allowed flex items-center justify-center">
+              {error && (<div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm border border-red-100">{error}</div>)}
+              {!googleAuthLoaded ? (
+                <button disabled className="w-full bg-gray-400 text-white font-medium py-3 px-4 rounded-lg flex items-center justify-center cursor-not-allowed">
                   <RefreshIcon className="animate-spin mr-2" />Загрузка модулей Google...
                 </button>
               ) : (
                 <button onClick={authenticate} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                  <GoogleIcon className="mr-2" />Войти через Google
+                  <GoogleIcon className="mr-2" />Войти через Google и выбрать папку
                 </button>
               )}
             </div>
@@ -356,15 +362,42 @@ export default function App() {
 
           {step === 3 && (
             <div>
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Выберите папку</h2>
-              {isLoading && !folders.length ? (
-                 <div className="text-center py-8"><RefreshIcon className="animate-spin inline text-blue-600"/> Загрузка папок...</div>
-              ) : folders.length === 0 ? (
-                <div className="text-center py-8 text-gray-500">
-                  <FolderIcon className="mx-auto mb-3 opacity-50" />
-                  <p>Папки не найдены в корне диска</p>
-                  <p className="text-xs mt-2">Или создайте новую папку на Диске и попробуйте снова.</p>
-                  <button onClick={() => loadFolders(accessToken)} className="mt-3 text-blue-600 hover:text-blue-700 text-sm font-medium">Обновить список</button>
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">Выберите место сохранения</h2>
+              
+              {/* Опция корня */}
+              <button 
+                onClick={() => setSelectedFolder(null)} 
+                className={`w-full p-4 rounded-lg border-2 text-left transition-all flex items-center mb-4 ${selectedFolder === null ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'}`}
+              >
+                <div className="bg-blue-100 p-2 rounded mr-3 text-blue-600">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                </div>
+                <div className="flex-1">
+                  <span className="block font-semibold text-gray-800">Мой диск (Корень)</span>
+                  <span className="text-xs text-gray-500">Сохранить таблицу в главную папку Диска</span>
+                </div>
+                {selectedFolder === null && (<CheckIcon className="text-blue-600" />)}
+              </button>
+
+              <div className="flex items-center my-4">
+                <div className="flex-1 border-t border-gray-200"></div>
+                <span className="px-3 text-xs text-gray-400 uppercase">Или выберите папку</span>
+                <div className="flex-1 border-t border-gray-200"></div>
+              </div>
+
+              {loadError && (
+                <div className="mb-4 p-3 bg-yellow-50 text-yellow-700 rounded-lg text-sm border border-yellow-100 flex items-start">
+                  <AlertIcon className="mr-2 flex-shrink-0 mt-0.5" />
+                  <span>{loadError}</span>
+                </div>
+              )}
+
+              {folders.length === 0 ? (
+                <div className="text-center py-6 text-gray-500 bg-gray-50 rounded-lg">
+                  <p className="mb-3">Список папок пуст</p>
+                  <button onClick={loadFolders} className="text-blue-600 hover:text-blue-700 text-sm font-medium flex items-center justify-center mx-auto">
+                    <RefreshIcon className="mr-1" /> Обновить список
+                  </button>
                 </div>
               ) : (
                 <div className="max-h-64 overflow-y-auto mb-6 space-y-2 pr-1">
@@ -372,14 +405,16 @@ export default function App() {
                     <button key={folder.id} onClick={() => setSelectedFolder(folder)} className={`w-full p-3 rounded-lg border-2 text-left transition-all flex items-center ${selectedFolder?.id === folder.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'}`}>
                       <FolderIcon className="mr-3 text-yellow-600" />
                       <span className="flex-1 text-gray-700 truncate">{folder.name}</span>
-                      {selectedFolder?.id === folder.id && <CheckIcon className="text-blue-600" />}
+                      {selectedFolder?.id === folder.id && (<CheckIcon className="text-blue-600" />)}
                     </button>
                   ))}
                 </div>
               )}
-              {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm border border-red-100">{error}</div>}
-              <button onClick={createGoogleSheet} disabled={!selectedFolder || isCreating} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                {isCreating ? <><RefreshIcon className="animate-spin mr-2" />Создание...</> : <><SheetIcon className="mr-2" />Создать таблицу</>}
+              
+              {error && (<div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm border border-red-100">{error}</div>)}
+              
+              <button onClick={createGoogleSheet} disabled={isCreating} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
+                {isCreating ? (<><RefreshIcon className="animate-spin mr-2" />Создание таблицы...</>) : (<><SheetIcon className="mr-2" />Создать Google Таблицу</>)}
               </button>
             </div>
           )}
@@ -389,14 +424,14 @@ export default function App() {
               <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <CheckIcon className="text-green-600" style={{ width: 32, height: 32 }} />
               </div>
-              <h2 className="text-xl font-semibold text-gray-800 mb-2">Готово!</h2>
+              <h2 className="text-xl font-semibold text-gray-800 mb-2">Таблица успешно создана!</h2>
               <p className="text-gray-600 mb-6">{result.title}</p>
               <a href={result.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors mb-4 shadow-md">
-                <GoogleIcon className="mr-2" />Открыть <ArrowRightIcon className="ml-2" />
+                <GoogleIcon className="mr-2" />Открыть в Google Таблицах<ArrowRightIcon className="ml-2" />
               </a>
               <div className="pt-4 border-t">
                 <button onClick={resetApp} className="text-gray-600 hover:text-gray-800 text-sm font-medium flex items-center mx-auto">
-                  <RefreshIcon className="mr-2" />Еще один файл
+                  <RefreshIcon className="mr-2" />Конвертировать другой файл
                 </button>
               </div>
             </div>
@@ -404,7 +439,7 @@ export default function App() {
         </div>
         
         <div className="mt-6 text-center text-sm text-gray-500 flex items-center justify-center">
-          <LockIcon className="inline-block mr-1" />Данные обрабатываются локально и передаются только в Google
+          <LockIcon className="inline-block mr-1" />Ваши данные обрабатываются локально и передаются только в Google
         </div>
       </div>
     </div>
