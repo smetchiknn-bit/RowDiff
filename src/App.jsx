@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react"
+import { useState, useCallback, useEffect } from "react"
 import * as XLSX from "xlsx"
 
 // ============================================
@@ -26,54 +26,52 @@ export default function App() {
   const [fileName, setFileName] = useState("")
   const [isDragging, setIsDragging] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
-  const [accessToken, setAccessToken] = useState(null)
   const [folders, setFolders] = useState([])
   const [selectedFolder, setSelectedFolder] = useState(null)
   const [isCreating, setIsCreating] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
-  
-  // Ссылка для хранения токена клиента GIS
-  const tokenClientRef = useRef(null)
+  const [gapiLoaded, setGapiLoaded] = useState(false)
+  const [gisLoaded, setGisLoaded] = useState(false)
+  const [tokenClient, setTokenClient] = useState(null)
 
   // Проверка конфигурации при загрузке
   useEffect(() => {
     if (!GOOGLE_CLIENT_ID || !GOOGLE_API_KEY) {
-      console.error("КРИТИЧЕСКАЯ ОШИБКА: Отсутствуют ключи API. Проверьте переменные окружения.")
+      console.error("КРИТИЧЕСКАЯ ОШИБКА: Отсутствуют ключи API.")
     }
   }, [])
 
-  // Загрузка скриптов Google (GAPI + GIS)
-  const loadGoogleScripts = () => {
-    return new Promise((resolve, reject) => {
-      if (window.gapi && window.google) {
-        resolve()
-        return
-      }
+  // Загрузка скриптов Google
+  useEffect(() => {
+    const loadScripts = async () => {
+      // 1. Загрузка GAPI (для работы с Drive/Sheets)
+      await new Promise((resolve, reject) => {
+        if (window.gapi) { resolve(); return }
+        const script = document.createElement('script')
+        script.src = 'https://apis.google.com/js/api.js'
+        script.onload = () => {
+          window.gapi.load('client', resolve)
+        }
+        script.onerror = reject
+        document.body.appendChild(script)
+      })
 
-      let scriptsLoaded = 0
-      const checkDone = () => {
-        scriptsLoaded++
-        if (scriptsLoaded === 2) resolve()
-      }
-
-      // 1. Загрузка GAPI (для вызовов API)
-      const gapiScript = document.createElement('script')
-      gapiScript.src = 'https://apis.google.com/js/api.js'
-      gapiScript.onload = () => {
-        window.gapi.load('client', checkDone)
-      }
-      gapiScript.onerror = () => reject(new Error("Не удалось загрузить GAPI"))
-      document.body.appendChild(gapiScript)
-
-      // 2. Загрузка GIS (для авторизации)
-      const gisScript = document.createElement('script')
-      gisScript.src = 'https://accounts.google.com/gsi/client'
-      gisScript.onload = checkDone
-      gisScript.onerror = () => reject(new Error("Не удалось загрузить Google Identity Services"))
-      document.body.appendChild(gisScript)
-    })
-  }
+      // 2. Загрузка GIS (для новой авторизации)
+      await new Promise((resolve, reject) => {
+        if (window.google && window.google.accounts) { resolve(); return }
+        const script = document.createElement('script')
+        script.src = 'https://accounts.google.com/gsi/client'
+        script.onload = resolve
+        script.onerror = reject
+        document.body.appendChild(script)
+      })
+      
+      setGapiLoaded(true)
+      setGisLoaded(true)
+    }
+    loadScripts()
+  }, [])
 
   const handleFile = useCallback((file) => {
     if (!file || !file.name.endsWith('.xlsx')) {
@@ -90,7 +88,7 @@ export default function App() {
         const workbook = XLSX.read(data, { type: 'array' })
         const sheets = workbook.SheetNames.map(name => ({
           name,
-           XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 })
+          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 }) // ИСПРАВЛЕНО: добавлено "data:"
         }))
         setExcelData({ workbook, sheets })
         setStep(2)
@@ -125,69 +123,70 @@ export default function App() {
     handleFile(file)
   }, [handleFile])
 
+  const initializeGapiClient = async () => {
+    if (!window.gapi.client.getToken()) {
+       // Токен будет получен через GIS, здесь просто инициализируем клиент с ключом
+       await window.gapi.client.init({
+         apiKey: GOOGLE_API_KEY,
+         discoveryDocs: [
+           'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
+           'https://sheets.googleapis.com/$discovery/rest?version=v4'
+         ]
+       })
+    }
+  }
+
   const authenticate = async () => {
-    if (!GOOGLE_CLIENT_ID) {
-      setError('Ошибка конфигурации: Google Client ID не найден.')
+    if (!GOOGLE_CLIENT_ID || !gisLoaded) {
+      setError('Сервисы Google еще не загружены или ключи не найдены.')
       return
     }
     
     try {
       setIsLoading(true)
       setError(null)
-      
-      await loadGoogleScripts()
 
-      // Инициализация GAPI Client
-      await window.gapi.client.init({
-        apiKey: GOOGLE_API_KEY,
-        discoveryDocs: [
-          'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
-          'https://sheets.googleapis.com/$discovery/rest?version=v4'
-        ]
-      })
+      // Инициализация клиента GAPI (без токена пока)
+      await initializeGapiClient()
 
-      // Инициализация клиента токенов через новую библиотеку GIS
-      tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+      // Создание клиента токенов через новую библиотеку GIS
+      const client = window.google.accounts.oauth2.initTokenClient({
         client_id: GOOGLE_CLIENT_ID,
         scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
-        callback: (response) => {
+        callback: async (response) => {
           if (response.error) {
-            setError(`Ошибка авторизации: ${response.error}`)
+            setError(`Ошибка авторизации: ${response.error_description || response.error}`)
             setIsLoading(false)
             return
           }
-          if (response.access_token) {
-            setAccessToken(response.access_token)
-            // Токен получен, теперь можно загружать папки
-            loadFolders(response.access_token).then(() => {
-              setStep(3)
-              setIsLoading(false)
-            }).catch(err => {
-              setError('Ошибка загрузки папок: ' + err.message)
-              setIsLoading(false)
-            })
+          
+          // Устанавливаем полученный токен в GAPI
+          window.gapi.client.setToken({ access_token: response.access_token })
+          
+          try {
+            await loadFolders()
+            setStep(3)
+            setIsLoading(false)
+          } catch (err) {
+            setError('Ошибка загрузки папок: ' + err.message)
+            setIsLoading(false)
           }
         },
       })
 
-      // Запрос токена у пользователя (откроется всплывающее окно)
-      tokenClientRef.current.requestAccessToken({
-        prompt: 'consent' // Всегда запрашивать подтверждение, чтобы получить новый токен
-      })
+      setTokenClient(client)
+      
+      // Запуск процесса авторизации (показывает всплывающее окно)
+      client.requestAccessToken({ prompt: 'consent' })
 
     } catch (err) {
-      console.error("Auth process failed:", err)
-      setError(err.message || "Неизвестная ошибка при подключении к Google")
+      console.error("Auth setup failed:", err)
+      setError('Ошибка инициализации авторизации: ' + err.message)
       setIsLoading(false)
     }
   }
 
-  const loadFolders = async (token) => {
-    const actualToken = token || accessToken
-    if (!actualToken) throw new Error("Нет токена доступа")
-
-    window.gapi.client.setToken({ access_token: actualToken })
-
+  const loadFolders = async () => {
     try {
       const response = await window.gapi.client.drive.files.list({
         q: "mimeType='application/vnd.google-apps.folder' and trashed=false",
@@ -208,18 +207,10 @@ export default function App() {
       setError('Пожалуйста, выберите папку для сохранения')
       return
     }
-    if (!accessToken) {
-      setError('Сессия истекла. Пожалуйста, войдите снова.')
-      return
-    }
-
     try {
       setIsCreating(true)
       setError(null)
       
-      // Устанавливаем токен перед запросом
-      window.gapi.client.setToken({ access_token: accessToken })
-
       const spreadsheetTitle = fileName.replace('.xlsx', '') + ' - ' + new Date().toLocaleDateString('ru-RU')
       
       // 1. Создаем таблицу
@@ -292,11 +283,7 @@ export default function App() {
     setSelectedFolder(null)
     setResult(null)
     setError(null)
-    setAccessToken(null)
-    if (tokenClientRef.current) {
-        // Можно отозвать токен при сбросе, если нужно
-        // window.google.accounts.oauth2.revoke(accessToken, callback);
-    }
+    // Не сбрасываем токен, чтобы пользователь оставался вошедшим
   }
 
   return (
@@ -328,14 +315,13 @@ export default function App() {
         </div>
 
         <div className="bg-white rounded-xl shadow-lg p-6 md:p-8">
-          {/* Глобальное предупреждение о ключах */}
           {(!GOOGLE_CLIENT_ID || !GOOGLE_API_KEY) && step === 1 && (
              <div className="mb-6 p-4 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-700 text-sm">
                <div className="flex">
                  <div className="flex-shrink-0"><AlertIcon /></div>
                  <div className="ml-3">
                    <p className="font-bold">Внимание: Ключи API не найдены</p>
-                   <p>Приложение работает в демо-режиме. Для полноценной работы добавьте <code>VITE_GOOGLE_CLIENT_ID</code> и <code>VITE_GOOGLE_API_KEY</code> в переменные окружения Vercel.</p>
+                   <p>Добавьте <code>VITE_GOOGLE_CLIENT_ID</code> и <code>VITE_GOOGLE_API_KEY</code> в переменные окружения Vercel.</p>
                  </div>
                </div>
              </div>
@@ -379,9 +365,14 @@ export default function App() {
                 </div>
               </div>
               {error && (<div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm border border-red-100">{error}</div>)}
-              <button onClick={authenticate} disabled={isLoading} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                {isLoading ? (<><RefreshIcon className="animate-spin mr-2" />Подключение...</>) : (<><GoogleIcon className="mr-2" />Войти через Google и выбрать папку</>)}
+              <button 
+                onClick={authenticate} 
+                disabled={isLoading || !gisLoaded} 
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md"
+              >
+                {isLoading ? (<><RefreshIcon className="animate-spin mr-2" />Подключение...</>) : (<><GoogleIcon className="mr-2" />Войти через Google</>)}
               </button>
+              {!gisLoaded && <p className="text-xs text-center text-gray-500 mt-2">Загрузка модулей безопасности Google...</p>}
             </div>
           )}
 
@@ -392,7 +383,7 @@ export default function App() {
                 <div className="text-center py-8 text-gray-500">
                   <FolderIcon className="mx-auto mb-3 opacity-50" />
                   <p>Папки не найдены или ошибка загрузки</p>
-                  <button onClick={() => loadFolders(accessToken)} className="mt-3 text-blue-600 hover:text-blue-700 text-sm font-medium">Обновить список</button>
+                  <button onClick={loadFolders} className="mt-3 text-blue-600 hover:text-blue-700 text-sm font-medium">Обновить список</button>
                 </div>
               ) : (
                 <div className="max-h-64 overflow-y-auto mb-6 space-y-2 pr-1">
