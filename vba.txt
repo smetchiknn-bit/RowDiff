@@ -1,0 +1,357 @@
+Sub ОбработкаВОР()
+    Dim fd As FileDialog
+    Dim vorPath As String
+    Dim wbTemplate As Workbook
+    Dim wbVOR As Workbook
+    Dim wsTemplate As Worksheet
+    Dim wsVOR As Worksheet
+    Dim cellValue As Variant
+    Dim userResponse As VbMsgBoxResult
+    Dim retry As Boolean
+    Dim lastRowVOR As Long
+    Dim lastRowTemplate As Long
+    Dim lastRowS As Long
+    Dim colDict As Object
+    Dim i As Long, j As Long
+    Dim templateCol As Long
+    Dim key As Variant
+    Dim startTime As Double
+    Dim finalLastRow As Long  ' Переменная для хранения последней строки после вставки
+    Dim ac6Value As Variant   ' Переменная для хранения значения из AC6
+    Dim extractedValue As String ' Переменная для хранения извлеченного значения
+    Dim clearRange As Range   ' Диапазон для очистки
+    
+    ' Засекаем время начала выполнения
+    startTime = Timer
+    
+    ' ========== ОПТИМИЗАЦИЯ: Отключаем визуализацию и автоматические расчеты ==========
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    
+    ' ========== ШАГ 1: Проверка текущего файла-шаблона ==========
+    Set wbTemplate = ThisWorkbook
+    
+    On Error Resume Next
+    Set wsTemplate = wbTemplate.Worksheets("БылоСтало")
+    On Error GoTo 0
+    
+    If wsTemplate Is Nothing Then
+        MsgBox "Ошибка: В текущем файле отсутствует лист 'БылоСтало'.", vbCritical, "Ошибка"
+        GoTo CleanUp
+    End If
+    
+    ' ========== ШАГ 2: Выбор и проверка файла ВОР ==========
+    Set fd = Application.FileDialog(msoFileDialogFilePicker)
+    
+    With fd
+        .Title = "Укажите путь к файлу ВОР"
+        .Filters.Clear
+        .Filters.Add "Файлы Excel", "*.xlsx; *.xlsm; *.xls", 1
+        .AllowMultiSelect = False
+        
+        retry = True
+        Do While retry
+            retry = False
+            
+            If .Show = -1 Then
+                vorPath = .SelectedItems(1)
+                
+                On Error Resume Next
+                Set wbVOR = Workbooks.Open(vorPath)
+                On Error GoTo 0
+                
+                If wbVOR Is Nothing Then
+                    MsgBox "Не удалось открыть файл ВОР.", vbExclamation, "Ошибка открытия"
+                    retry = True
+                Else
+                    On Error Resume Next
+                    Set wsVOR = wbVOR.Worksheets("Sheet1")
+                    On Error GoTo 0
+                    
+                    If wsVOR Is Nothing Then
+                        userResponse = MsgBox("Вы уверены что выбрали ВОР? Проверьте!" & vbCrLf & _
+                                              "Лист 'Sheet1' не найден.", _
+                                              vbYesNo + vbQuestion, "Проверка ВОР")
+                        If userResponse = vbYes Then
+                            Exit Do
+                        Else
+                            wbVOR.Close SaveChanges:=False
+                            Set wbVOR = Nothing
+                            retry = True
+                        End If
+                    Else
+                        cellValue = wsVOR.Range("A1").value
+                        
+                        If cellValue = "timestamp_create" Then
+                            Exit Do
+                        Else
+                            userResponse = MsgBox("Вы уверены что выбрали ВОР? Проверьте!" & vbCrLf & _
+                                                  "В ячейке A1 ожидается 'timestamp_create', найдено: " & IIf(IsNull(cellValue), "<пусто>", cellValue), _
+                                                  vbYesNo + vbQuestion, "Проверка ВОР")
+                            If userResponse = vbYes Then
+                                Exit Do
+                            Else
+                                wbVOR.Close SaveChanges:=False
+                                Set wbVOR = Nothing
+                                retry = True
+                            End If
+                        End If
+                    End If
+                End If
+            Else
+                MsgBox "Операция отменена пользователем.", vbInformation, "Отмена"
+                GoTo CleanUp
+            End If
+        Loop
+    End With
+    
+    If wbVOR Is Nothing Then
+        GoTo CleanUp
+    End If
+    
+    ' ========== ШАГ 3: Переименование заголовков в файле ВОР ==========
+    
+    ' Получаем текущие заголовки из ВОР (строка 1)
+    Dim lastColVOR As Long
+    lastColVOR = wsVOR.Cells(1, wsVOR.Columns.Count).End(xlToLeft).Column
+    
+    ' Создаем словарь соответствия заголовков
+    Set colDict = CreateObject("Scripting.Dictionary")
+    
+    ' Массивы соответствий (заголовок ВОР -> заголовок шаблона)
+    Dim headersVOR As Variant
+    Dim headersTemplate As Variant
+    Dim cleanedVOR As String
+    Dim cleanedTemplate As String
+    
+    headersVOR = Array("ИД Проект", "ИД Город", "ИД Регион", "Дата Расч", "ИД Объект", "ИД Корпус", _
+                       "ИД Секция", "Имя Секция", "ИД Уровень", "Имя уровень", "ИД Этаж", "Имя Этаж", _
+                       "ИД Помещ", "ИД Зона", "ИД ССР", "ИД Группы", "ИД ТМЦ", "ИД КЕР", _
+                       "Наименование КЕР_ТМЦ", "ЕдИзм КЕР_ТМЦ", "Расход ТМЦ", "К_во КЕР_ТМЦ", _
+                       "Фильтр ГР", "Фильтр КЕР", "Фильтр ТМЦ", "ИД КЕР1", "КЕР в СР", _
+                       "ИД ГР в ИД КЕР сорт", "ИД ГР в ИД КЕР", "ИД КЕР в ИД ТМЦ", "ИД КЕР в СР в ИД ТМЦ")
+    
+    headersTemplate = Array("ИД Проект", "ИД Город", "ИД Регион", "Дата Расч", "ИД Объект", "ИД Корпус", _
+                            "ИД Секция", "Имя Секция", "ИД Уровень", "Имя Уровень", "ИД Этаж", "Имя Этаж", _
+                            "ИД Помещ", "ИД Зона", "ИД ССР", "ИД Группы", "ИД ТМЦ", "ИД КЕР", _
+                            "Наименование КЕР_ТМЦ", "ЕдИзм КЕР_ТМЦ", "Расход ТМЦ", "Было К_во КЕР_ТМЦ", _
+                            "Фильтр ГР", "Фильтр КЕР", "Фильтр ТМЦ", "ИД КЕР1", "КЕР в СР", _
+                            "ИД ГР в ИД КЕР сорт", "ИД ГР в ИД КЕР", "ИД КЕР в ИД ТМЦ", "ИД КЕР в СР в ИД ТМЦ")
+    
+    ' Заполняем словарь
+    For i = LBound(headersVOR) To UBound(headersVOR)
+        cleanedVOR = CleanHeader(headersVOR(i))
+        cleanedTemplate = CleanHeader(headersTemplate(i))
+        colDict(cleanedVOR) = headersTemplate(i)
+    Next i
+    
+    ' Переименовываем заголовки в ВОР
+    Dim currentHeader As Variant
+    Dim currentHeaderCleaned As String
+    Dim templateHeadersArray As Variant
+    
+    ' Заранее загружаем заголовки шаблона в массив для быстрого доступа
+    ReDim templateHeadersArray(1 To 31)
+    For j = 1 To 31
+        templateHeadersArray(j) = CleanHeader(wsTemplate.Cells(4, j).value)
+    Next j
+    
+    For i = 1 To lastColVOR
+        currentHeader = wsVOR.Cells(1, i).value
+        currentHeaderCleaned = CleanHeader(currentHeader)
+        
+        If colDict.exists(currentHeaderCleaned) Then
+            wsVOR.Cells(1, i).value = colDict(currentHeaderCleaned)
+        End If
+    Next i
+    
+    ' ========== ШАГ 4: Удаление данных и очистка форматирования из шаблона ==========
+    lastRowTemplate = wsTemplate.Cells(wsTemplate.Rows.Count, "A").End(xlUp).Row
+    
+    If lastRowTemplate >= 6 Then
+        ' Определяем диапазон для очистки
+        Set clearRange = wsTemplate.Range("A6:AE" & lastRowTemplate)
+        
+        ' Очищаем содержимое ячеек
+        clearRange.ClearContents
+        
+        ' Очищаем заливку (интерьер) ячеек
+        clearRange.Interior.ColorIndex = xlNone
+        
+        ' Устанавливаем черный цвет шрифта
+        clearRange.Font.Color = RGB(0, 0, 0)
+        
+        ' Очищаем данные в колонке AF (с сохранением условного форматирования)
+        Set clearRange = wsTemplate.Range("AF6:AF" & lastRowTemplate)
+        clearRange.ClearContents
+        clearRange.Interior.ColorIndex = xlNone
+        clearRange.Font.Color = RGB(0, 0, 0)
+    End If
+    
+    ' ========== ШАГ 5: Копирование данных из ВОР в шаблон ==========
+    ' Определяем последнюю строку с данными в ВОР
+    lastRowVOR = wsVOR.Cells(wsVOR.Rows.Count, "A").End(xlUp).Row
+    
+    If lastRowVOR >= 2 Then
+        ' Создаем массив соответствия столбцов
+        Dim colMappingArray() As Long
+        ReDim colMappingArray(1 To lastColVOR)
+        
+        ' Заполняем массив соответствия
+        For i = 1 To lastColVOR
+            currentHeader = wsVOR.Cells(1, i).value
+            currentHeaderCleaned = CleanHeader(currentHeader)
+            
+            For j = 1 To 31
+                If currentHeaderCleaned = templateHeadersArray(j) Then
+                    colMappingArray(i) = j
+                    Exit For
+                End If
+            Next j
+        Next i
+        
+        ' Используем массивы для ускорения копирования
+        Dim vorData As Variant
+        Dim templateData As Variant
+        Dim sourceRow As Long
+        Dim destRow As Long
+        Dim col As Long
+        
+        ' Считываем все данные из ВОР в массив
+        vorData = wsVOR.Range("A2:" & wsVOR.Cells(lastRowVOR, lastColVOR).Address).value
+        
+        ' Создаем массив для данных шаблона
+        Dim rowsToCopy As Long
+        rowsToCopy = lastRowVOR - 1
+        ReDim templateData(1 To rowsToCopy, 1 To 31)
+        
+        ' Заполняем массив данными
+        destRow = 0
+        For sourceRow = 1 To rowsToCopy
+            ' Проверяем, что строка не пустая
+            Dim isEmptyRow As Boolean
+            isEmptyRow = True
+            For col = 1 To lastColVOR
+                If Not IsEmpty(vorData(sourceRow, col)) And vorData(sourceRow, col) <> "" Then
+                    isEmptyRow = False
+                    Exit For
+                End If
+            Next col
+            
+            If Not isEmptyRow Then
+                destRow = destRow + 1
+                For col = 1 To lastColVOR
+                    If colMappingArray(col) > 0 Then
+                        templateData(destRow, colMappingArray(col)) = vorData(sourceRow, col)
+                    End If
+                Next col
+            End If
+        Next sourceRow
+        
+        ' Выгружаем данные в шаблон
+        If destRow > 0 Then
+            wsTemplate.Range("A6").Resize(destRow, 31).value = templateData
+            
+            ' ========== ДОПОЛНЕНИЕ: Подставляем данные из колонки V в колонку AF ==========
+            ' Определяем последнюю строку по колонке S (или по колонке A, если S пустая)
+            lastRowS = wsTemplate.Cells(wsTemplate.Rows.Count, "S").End(xlUp).Row
+            If lastRowS < 6 Then
+                lastRowS = wsTemplate.Cells(wsTemplate.Rows.Count, "A").End(xlUp).Row
+            End If
+            
+            If lastRowS >= 6 Then
+                ' Копируем данные из колонки V в колонку AF (прямые ссылки)
+                wsTemplate.Range("AF6:AF" & lastRowS).value = wsTemplate.Range("V6:V" & lastRowS).value
+            End If
+            
+            ' ========== ШАГ 6: Извлечение данных из AC6 и вставка в AC3 ==========
+            ' Получаем значение из ячейки AC6
+            ac6Value = wsTemplate.Range("AC6").value
+            
+            ' Извлекаем текст до разделителя "-"
+            extractedValue = ExtractBeforeDelimiter(ac6Value, "-")
+            
+            ' Вставляем извлеченное значение в ячейку AC3
+            If extractedValue <> "" Then
+                wsTemplate.Range("AC3").value = extractedValue
+            Else
+                ' Если значение пустое или разделитель не найден, очищаем AC3
+                wsTemplate.Range("AC3").ClearContents
+            End If
+            
+            ' ========== ШАГ 7: Вставка формулы в AI3 для динамического определения последней строки ==========
+            ' Очищаем и записываем формулу в ячейку AI3
+            wsTemplate.Range("AI3").ClearContents
+            wsTemplate.Range("AI3").FormulaLocal = "=ПРОСМОТР(2;1/(S:S<>"""");СТРОКА(S:S))"
+            
+            ' Определяем последнюю строку стандартным способом (для использования в коде)
+            finalLastRow = wsTemplate.Cells(wsTemplate.Rows.Count, "A").End(xlUp).Row
+            
+            ' Если данных нет (только заголовки до 5 строки), то finalLastRow будет меньше 6
+            If finalLastRow < 6 Then
+                finalLastRow = 5 ' Устанавливаем 5, так как данные начинаются с 6 строки
+            End If
+            
+            ' ========== ШАГ 8: Форматирование дат в колонке D ==========
+            ' Применяем формат даты "ДД.ММ.ГГГГ" к диапазону D6:D[последняя строка]
+            If finalLastRow >= 6 Then
+                With wsTemplate.Range("D6:D" & finalLastRow)
+                    .NumberFormat = "DD.MM.YYYY"
+                End With
+            End If
+            
+            ' ========== ШАГ 9: Заполнение пустых ячеек ВВЕРХ в диапазоне A6:N[последняя строка] ==========
+            ' Определяем диапазон для заполнения: столбцы A до N, строки с 6 до finalLastRow
+            Dim fillRange As Range
+            Set fillRange = wsTemplate.Range("A6:N" & finalLastRow)
+            
+            ' Заполняем пустые ячейки значениями СНИЗУ ВВЕРХ (без запросов и сообщений)
+            Call FillUpFromBelow(fillRange)
+            
+            MsgBox "Данные успешно скопированы. Скопировано " & destRow & " строк." & vbCrLf & _
+                   "Колонка AF заполнена данными из колонки V." & vbCrLf & _
+                   "В ячейку AC3 подставлено значение: " & IIf(extractedValue <> "", extractedValue, "<пусто>") & vbCrLf & _
+                   "В ячейку AI3 добавлена формула =ПРОСМОТР(2;1/(S:S<>"""");СТРОКА(S:S))" & vbCrLf & _
+                   "Последняя строка с данными на листе 'БылоСтало': " & finalLastRow & vbCrLf & _
+                   "Применен формат дат ДД.ММ.ГГГГ для колонки D." & vbCrLf & _
+                   "Выполнено заполнение пустых ячеек ВВЕРХ в диапазоне A6:N" & finalLastRow & vbCrLf & _
+                   "Выполнена очистка заливки и установлен черный цвет шрифта.", vbInformation, "Готово"
+        Else
+            MsgBox "В файле ВОР нет данных для копирования.", vbExclamation, "Предупреждение"
+        End If
+    Else
+        MsgBox "В файле ВОР нет данных для копирования.", vbExclamation, "Предупреждение"
+    End If
+    
+    ' ========== ЗАВЕРШЕНИЕ ==========
+    ' Сохраняем и закрываем ВОР
+    On Error Resume Next
+    wbVOR.Close SaveChanges:=True
+    On Error GoTo 0
+    
+    ' Активируем шаблон
+    wbTemplate.Activate
+    wsTemplate.Activate
+    
+CleanUp:
+    ' Восстанавливаем настройки Excel
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    
+    ' Выводим время выполнения
+    Dim elapsedTime As Double
+    elapsedTime = Timer - startTime
+    MsgBox "Обработка завершена!" & vbCrLf & "Время выполнения: " & Format(elapsedTime, "0.00") & " сек.", vbInformation, "Успешно"
+    
+    ' Очистка объектов
+    Set colDict = Nothing
+    Set wsVOR = Nothing
+    Set wsTemplate = Nothing
+    Set wbVOR = Nothing
+    Set fd = Nothing
+End Sub
+
