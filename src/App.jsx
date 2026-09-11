@@ -28,34 +28,50 @@ export default function App() {
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   
-  // Состояния готовности API
-  const [gapiReady, setGapiReady] = useState(false)
-  const [gisReady, setGisReady] = useState(false)
+  // Состояния загрузки
+  const [gapiLoaded, setGapiLoaded] = useState(false)
+  const [gisLoaded, setGisLoaded] = useState(false)
   const [initError, setInitError] = useState(null)
 
   // Загрузка скриптов
   useEffect(() => {
-    const loadScripts = async () => {
+    const loadGoogleLibs = async () => {
       try {
-        // 1. Загрузка GAPI
+        // 1. Загружаем основной скрипт gapi
         if (!window.gapi) {
           await new Promise((resolve, reject) => {
             const script = document.createElement('script')
             script.src = 'https://apis.google.com/js/api.js'
             script.onload = resolve
-            script.onerror = () => reject(new Error("Не удалось загрузить GAPI"))
+            script.onerror = () => reject(new Error("Не удалось загрузить gapi"))
             document.body.appendChild(script)
           })
         }
-        
-        // Инициализация GAPI клиента
-        await window.gapi.client.init({
-          apiKey: GOOGLE_API_KEY,
-          clientId: GOOGLE_CLIENT_ID
-        })
-        setGapiReady(true)
 
-        // 2. Загрузка GIS (Google Identity Services)
+        // 2. Инициализируем клиент через надежный метод load
+        await new Promise((resolve, reject) => {
+          window.gapi.load('client', {
+            callback: resolve,
+            onerror: reject,
+            timeout: 5000, 
+            ontimeout: () => reject(new Error("Таймаут загрузки gapi.client"))
+          })
+        })
+
+        // 3. Инициализируем сам клиент
+        try {
+          await window.gapi.client.init({
+            apiKey: GOOGLE_API_KEY,
+            clientId: GOOGLE_CLIENT_ID
+          })
+          setGapiLoaded(true)
+        } catch (e) {
+          console.error("GAPI Client Init Failed:", e)
+          // Не блокируем UI полностью, пробуем продолжить или покажем ошибку при действии
+          setGapiLoaded(true) // Помечаем как загружено, чтобы не висело "Загрузка..."
+        }
+
+        // 4. Загружаем GIS (Identity Services)
         if (!window.google || !window.google.accounts) {
           await new Promise((resolve, reject) => {
             const script = document.createElement('script')
@@ -65,14 +81,15 @@ export default function App() {
             document.body.appendChild(script)
           })
         }
-        setGisReady(true)
+        setGisLoaded(true)
+
       } catch (err) {
-        console.error("Init Error:", err)
+        console.error("Load Error:", err)
         setInitError(err.message)
       }
     }
 
-    loadScripts()
+    loadGoogleLibs()
   }, [])
 
   const handleFile = (file) => {
@@ -111,8 +128,8 @@ export default function App() {
   }
 
   const authenticate = () => {
-    if (!gisReady || !gapiReady) {
-      setError("Сервисы Google еще не загружены. Подождите пару секунд.")
+    if (!gisLoaded) {
+      setError("Сервисы Google еще не загружены. Подождите...")
       return
     }
 
@@ -125,7 +142,10 @@ export default function App() {
           return
         }
         setAccessToken(response.access_token)
-        window.gapi.client.setToken({ access_token: response.access_token })
+        // Явно устанавливаем токен для gapi, если он есть
+        if (window.gapi && window.gapi.client) {
+          window.gapi.client.setToken({ access_token: response.access_token })
+        }
         
         loadFolders()
         setStep(3)
@@ -168,7 +188,7 @@ export default function App() {
     const title = fileName.replace('.xlsx', '') + ' - ' + new Date().toLocaleDateString('ru-RU')
     
     try {
-      // 1. Создаем таблицу с правильной структурой
+      // 1. Создаем таблицу
       const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
         method: 'POST',
         headers: {
@@ -182,15 +202,15 @@ export default function App() {
       })
 
       if (!createRes.ok) {
-        const errorData = await createRes.json()
-        throw new Error(errorData.error?.message || `HTTP error ${createRes.status}`)
+        const errData = await createRes.json()
+        throw new Error(errData.error?.message || `HTTP ${createRes.status}`)
       }
 
       const createData = await createRes.json()
       const spreadsheetId = createData.spreadsheetId
       const firstSheetId = createData.sheets[0].properties.sheetId
 
-      // 2. Перемещаем в папку (если выбрана)
+      // 2. Перемещаем в папку
       if (selectedFolder) {
         await fetch(
           `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
@@ -204,8 +224,8 @@ export default function App() {
       // 3. Заполняем данными
       if (excelData && excelData.sheets.length > 0 && excelData.sheets[0].data.length > 0) {
         const sheet = excelData.sheets[0]
-        const maxCols = Math.max(...sheet.data.map(r => (r.length || 1)))
-
+        const maxCols = Math.max(...sheet.data.map(r => r.length || 1))
+        
         const requestBody = {
           requests: [{
             updateCells: {
@@ -289,124 +309,125 @@ export default function App() {
         </div>
 
         <div className="bg-white rounded-xl shadow-lg p-6 md:p-8">
-          {/* Статус инициализации */}
-          {!gapiReady || !gisReady ? (
-             <div className="text-center py-10">
-               <RefreshIcon className="animate-spin mx-auto mb-4 text-blue-600 w-8 h-8" />
-               <p className="text-gray-600 font-medium">Инициализация Google...</p>
-               <p className="text-sm text-gray-400 mt-2">Загрузка сервисов API</p>
-               {initError && <p className="text-red-500 text-sm mt-4">{initError}</p>}
+          {!gapiLoaded && !initError && step === 1 && (
+             <div className="mb-6 p-4 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-700 text-sm flex items-center">
+               <RefreshIcon className="animate-spin mr-2" /> Загрузка сервисов API...
              </div>
-          ) : (
-            <>
-              {step === 1 && (
-                <div>
-                  <h2 className="text-xl font-semibold text-gray-800 mb-4">Загрузите Excel файл</h2>
-                  <div 
-                    onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }} 
-                    onDragLeave={() => setIsDragging(false)} 
-                    onDrop={onDrop} 
-                    className={`border-2 border-dashed rounded-xl p-8 text-center transition-all cursor-pointer ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50'}`}
-                  >
-                    <input type="file" accept=".xlsx" onChange={(e) => handleFile(e.target.files[0])} className="hidden" id="fileInput" />
-                    <label htmlFor="fileInput" className="cursor-pointer block">
-                      <div className="flex flex-col items-center">
-                        <div className="mb-4 text-gray-400"><UploadIcon /></div>
-                        <p className="text-lg font-medium text-gray-700 mb-2">Перетащите файл сюда</p>
-                        <p className="text-sm text-gray-500 mb-4">или нажмите для выбора</p>
-                        <p className="text-xs text-gray-400">Только .xlsx</p>
-                      </div>
-                    </label>
+          )}
+
+          {initError && step === 1 && (
+             <div className="mb-6 p-4 bg-red-50 border-l-4 border-red-400 text-red-700 text-sm">
+               Ошибка загрузки Google API: {initError}. <br/>
+               <button onClick={() => window.location.reload()} className="underline mt-2 font-bold">Обновить страницу</button>
+             </div>
+          )}
+
+          {step === 1 && gapiLoaded && (
+            <div>
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">Загрузите Excel файл</h2>
+              <div 
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }} 
+                onDragLeave={() => setIsDragging(false)} 
+                onDrop={onDrop} 
+                className={`border-2 border-dashed rounded-xl p-8 text-center transition-all cursor-pointer ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50'}`}
+              >
+                <input type="file" accept=".xlsx" onChange={(e) => handleFile(e.target.files[0])} className="hidden" id="fileInput" />
+                <label htmlFor="fileInput" className="cursor-pointer block">
+                  <div className="flex flex-col items-center">
+                    <div className="mb-4 text-gray-400"><UploadIcon /></div>
+                    <p className="text-lg font-medium text-gray-700 mb-2">Перетащите файл сюда</p>
+                    <p className="text-sm text-gray-500 mb-4">или нажмите для выбора</p>
+                    <p className="text-xs text-gray-400">Только .xlsx</p>
+                  </div>
+                </label>
+              </div>
+            </div>
+          )}
+
+          {step === 2 && excelData && (
+            <div>
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">Файл готов</h2>
+              <div className="bg-gray-50 rounded-lg p-4 mb-6">
+                <div className="flex items-center mb-3">
+                  <FileIcon className="mr-3 text-blue-600" />
+                  <span className="font-medium text-gray-800 truncate">{fileName}</span>
+                </div>
+                <div className="text-sm text-gray-600">
+                  <p className="mb-2">Листов: <strong>{excelData.sheets.length}</strong></p>
+                  <div className="flex flex-wrap gap-2">
+                    {excelData.sheets.map((s, i) => (
+                      <span key={i} className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs flex items-center">
+                        <SheetIcon className="mr-1 w-3 h-3"/> {s.name}
+                      </span>
+                    ))}
                   </div>
                 </div>
-              )}
+              </div>
+              {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
+              <button onClick={authenticate} disabled={!gisLoaded} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
+                <GoogleIcon className="mr-2" /> Войти через Google
+              </button>
+            </div>
+          )}
 
-              {step === 2 && excelData && (
-                <div>
-                  <h2 className="text-xl font-semibold text-gray-800 mb-4">Файл готов</h2>
-                  <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                    <div className="flex items-center mb-3">
-                      <FileIcon className="mr-3 text-blue-600" />
-                      <span className="font-medium text-gray-800 truncate">{fileName}</span>
-                    </div>
-                    <div className="text-sm text-gray-600">
-                      <p className="mb-2">Листов: <strong>{excelData.sheets.length}</strong></p>
-                      <div className="flex flex-wrap gap-2">
-                        {excelData.sheets.map((s, i) => (
-                          <span key={i} className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs flex items-center">
-                            <SheetIcon className="mr-1 w-3 h-3"/> {s.name}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                  {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
-                  <button onClick={authenticate} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                    <GoogleIcon className="mr-2" /> Войти через Google
-                  </button>
+          {step === 3 && (
+            <div>
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">Куда сохранить?</h2>
+              
+              <button 
+                onClick={() => setSelectedFolder(null)} 
+                className={`w-full p-4 rounded-lg border-2 text-left transition-all mb-4 flex items-center ${selectedFolder === null ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'}`}
+              >
+                <div className="bg-blue-100 p-2 rounded mr-3 text-blue-600"><FolderIcon /></div>
+                <div className="flex-1">
+                  <div className="font-medium text-gray-800">Мой диск (Корень)</div>
+                  <div className="text-xs text-gray-500">Сохранить в главную папку Диска</div>
                 </div>
-              )}
+                {selectedFolder === null && <CheckIcon className="text-blue-600" />}
+              </button>
 
-              {step === 3 && (
-                <div>
-                  <h2 className="text-xl font-semibold text-gray-800 mb-4">Куда сохранить?</h2>
-                  
-                  <button 
-                    onClick={() => setSelectedFolder(null)} 
-                    className={`w-full p-4 rounded-lg border-2 text-left transition-all mb-4 flex items-center ${selectedFolder === null ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'}`}
-                  >
-                    <div className="bg-blue-100 p-2 rounded mr-3 text-blue-600"><FolderIcon /></div>
-                    <div className="flex-1">
-                      <div className="font-medium text-gray-800">Мой диск (Корень)</div>
-                      <div className="text-xs text-gray-500">Сохранить в главную папку Диска</div>
-                    </div>
-                    {selectedFolder === null && <CheckIcon className="text-blue-600" />}
-                  </button>
-
-                  <div className="text-sm text-gray-500 mb-2 font-medium">Или выберите папку:</div>
-                  
-                  {folders.length === 0 ? (
-                    <div className="text-center py-6 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-300">
-                      <p>Папки не найдены</p>
-                      <button onClick={loadFolders} className="mt-2 text-blue-600 text-xs hover:underline">Обновить список</button>
-                    </div>
-                  ) : (
-                    <div className="max-h-60 overflow-y-auto mb-6 space-y-2 pr-1">
-                      {folders.map((f) => (
-                        <button key={f.id} onClick={() => setSelectedFolder(f)} className={`w-full p-3 rounded-lg border-2 text-left transition-all flex items-center ${selectedFolder?.id === f.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'}`}>
-                          <FolderIcon className="mr-3 text-yellow-600" />
-                          <span className="flex-1 text-gray-700 truncate">{f.name}</span>
-                          {selectedFolder?.id === f.id && <CheckIcon className="text-blue-600" />}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  
-                  {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
-                  <button onClick={createGoogleSheet} disabled={isCreating} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                    {isCreating ? <><RefreshIcon className="animate-spin mr-2" /> Создание...</> : <><SheetIcon className="mr-2" /> Создать таблицу</>}
-                  </button>
+              <div className="text-sm text-gray-500 mb-2 font-medium">Или выберите папку:</div>
+              
+              {folders.length === 0 ? (
+                <div className="text-center py-6 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                  <p>Папки не найдены</p>
+                  <button onClick={loadFolders} className="mt-2 text-blue-600 text-xs hover:underline">Обновить список</button>
                 </div>
-              )}
-
-              {step === 4 && result && (
-                <div className="text-center">
-                  <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <CheckIcon className="text-green-600 w-8 h-8" />
-                  </div>
-                  <h2 className="text-xl font-semibold text-gray-800 mb-2">Готово!</h2>
-                  <p className="text-gray-600 mb-6">{result.title}</p>
-                  <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex items-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors mb-4 shadow-md">
-                    <GoogleIcon className="mr-2" /> Открыть таблицу <ArrowRightIcon className="ml-2 w-4 h-4"/>
-                  </a>
-                  <div className="pt-4 border-t">
-                    <button onClick={resetApp} className="text-gray-600 hover:text-gray-800 text-sm font-medium flex items-center mx-auto">
-                      <RefreshIcon className="mr-2" /> Конвертировать другой файл
+              ) : (
+                <div className="max-h-60 overflow-y-auto mb-6 space-y-2 pr-1">
+                  {folders.map((f) => (
+                    <button key={f.id} onClick={() => setSelectedFolder(f)} className={`w-full p-3 rounded-lg border-2 text-left transition-all flex items-center ${selectedFolder?.id === f.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'}`}>
+                      <FolderIcon className="mr-3 text-yellow-600" />
+                      <span className="flex-1 text-gray-700 truncate">{f.name}</span>
+                      {selectedFolder?.id === f.id && <CheckIcon className="text-blue-600" />}
                     </button>
-                  </div>
+                  ))}
                 </div>
               )}
-            </>
+              
+              {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
+              <button onClick={createGoogleSheet} disabled={isCreating} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
+                {isCreating ? <><RefreshIcon className="animate-spin mr-2" /> Создание...</> : <><SheetIcon className="mr-2" /> Создать таблицу</>}
+              </button>
+            </div>
+          )}
+
+          {step === 4 && result && (
+            <div className="text-center">
+              <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <CheckIcon className="text-green-600 w-8 h-8" />
+              </div>
+              <h2 className="text-xl font-semibold text-gray-800 mb-2">Готово!</h2>
+              <p className="text-gray-600 mb-6">{result.title}</p>
+              <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex items-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors mb-4 shadow-md">
+                <GoogleIcon className="mr-2" /> Открыть таблицу <ArrowRightIcon className="ml-2 w-4 h-4"/>
+              </a>
+              <div className="pt-4 border-t">
+                <button onClick={resetApp} className="text-gray-600 hover:text-gray-800 text-sm font-medium flex items-center mx-auto">
+                  <RefreshIcon className="mr-2" /> Конвертировать другой файл
+                </button>
+              </div>
+            </div>
           )}
         </div>
         
