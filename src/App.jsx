@@ -98,7 +98,7 @@ export default function App() {
         // Исправлено: добавлен ключ 'data' перед вызовом функции
         const sheets = workbook.SheetNames.map(name => ({
           name,
-          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
+           XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
         }))
         
         setExcelData({ workbook, sheets })
@@ -137,7 +137,8 @@ export default function App() {
           window.gapi.client.setToken({ access_token: response.access_token })
         }
         
-        loadFolders()
+        // Небольшая задержка перед загрузкой папок, чтобы токен точно применился
+        setTimeout(() => loadFolders(), 100)
         setStep(3)
       },
     })
@@ -246,12 +247,6 @@ export default function App() {
           }
         } else {
           // Для остальных листов создаем новые
-          // Мы не можем получить ID нового листа до выполнения batchUpdate, 
-          // поэтому используем временную логику: создадим листы, а потом заполним их отдельным запросом,
-          // ИЛИ (проще) сделаем два шага: сначала создадим все листы, потом заполним.
-          // Но API позволяет сделать это в одном запросе, если мы не ссылаемся на новый лист в том же запросе.
-          // Поэтому разобьем на два этапа внутри этой функции для надежности.
-          
           requests.push({
             addSheet: {
               properties: {
