@@ -27,69 +27,57 @@ export default function App() {
   const [isCreating, setIsCreating] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
-  
-  // Состояния загрузки
-  const [gapiLoaded, setGapiLoaded] = useState(false)
-  const [gisLoaded, setGisLoaded] = useState(false)
-  const [initError, setInitError] = useState(null)
+  const [gapiReady, setGapiReady] = useState(false)
+  const [gisReady, setGisReady] = useState(false)
 
-  // Загрузка скриптов
+  // Загрузка скриптов Google
   useEffect(() => {
-    const loadGoogleLibs = async () => {
+    const loadScripts = async () => {
       try {
-        // 1. Загружаем основной скрипт gapi
+        // 1. Загрузка GAPI
         if (!window.gapi) {
           await new Promise((resolve, reject) => {
             const script = document.createElement('script')
             script.src = 'https://apis.google.com/js/api.js'
             script.onload = resolve
-            script.onerror = () => reject(new Error("Не удалось загрузить gapi"))
+            script.onerror = () => reject(new Error("Failed to load gapi"))
             document.body.appendChild(script)
           })
         }
 
-        // 2. Инициализируем клиент через надежный метод load
-        await new Promise((resolve, reject) => {
-          window.gapi.load('client', {
-            callback: resolve,
-            onerror: reject,
-            timeout: 5000, 
-            ontimeout: () => reject(new Error("Таймаут загрузки gapi.client"))
+        // 2. Инициализация GAPI клиента
+        await new Promise((resolve) => {
+          window.gapi.load('client', () => {
+            window.gapi.client.init({
+              apiKey: GOOGLE_API_KEY,
+              clientId: GOOGLE_CLIENT_ID,
+              discoveryDocs: [
+                'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
+                'https://sheets.googleapis.com/$discovery/rest?version=v4'
+              ]
+            }).then(resolve).catch(resolve) // Игнорируем ошибки инициализации здесь, так как будем использовать fetch
           })
         })
+        setGapiReady(true)
 
-        // 3. Инициализируем сам клиент
-        try {
-          await window.gapi.client.init({
-            apiKey: GOOGLE_API_KEY,
-            clientId: GOOGLE_CLIENT_ID
-          })
-          setGapiLoaded(true)
-        } catch (e) {
-          console.error("GAPI Client Init Failed:", e)
-          // Не блокируем UI полностью, пробуем продолжить или покажем ошибку при действии
-          setGapiLoaded(true) // Помечаем как загружено, чтобы не висело "Загрузка..."
-        }
-
-        // 4. Загружаем GIS (Identity Services)
+        // 3. Загрузка GIS (Google Identity Services)
         if (!window.google || !window.google.accounts) {
           await new Promise((resolve, reject) => {
             const script = document.createElement('script')
             script.src = 'https://accounts.google.com/gsi/client'
             script.onload = resolve
-            script.onerror = () => reject(new Error("Не удалось загрузить GIS"))
+            script.onerror = () => reject(new Error("Failed to load gis"))
             document.body.appendChild(script)
           })
         }
-        setGisLoaded(true)
-
+        setGisReady(true)
       } catch (err) {
-        console.error("Load Error:", err)
-        setInitError(err.message)
+        console.error("Script load error:", err)
+        setError("Ошибка загрузки сервисов Google. Проверьте консоль или отключите блокировщики рекламы.")
       }
     }
 
-    loadGoogleLibs()
+    loadScripts()
   }, [])
 
   const handleFile = (file) => {
@@ -128,8 +116,8 @@ export default function App() {
   }
 
   const authenticate = () => {
-    if (!gisLoaded) {
-      setError("Сервисы Google еще не загружены. Подождите...")
+    if (!gisReady) {
+      setError("Сервисы Google еще не загружены. Подождите пару секунд.")
       return
     }
 
@@ -142,7 +130,7 @@ export default function App() {
           return
         }
         setAccessToken(response.access_token)
-        // Явно устанавливаем токен для gapi, если он есть
+        // Явно устанавливаем токен для gapi (на всякий случай)
         if (window.gapi && window.gapi.client) {
           window.gapi.client.setToken({ access_token: response.access_token })
         }
@@ -195,22 +183,16 @@ export default function App() {
           'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ 
-          properties: { title },
-          sheets: [{ properties: { title: "Sheet1" } }] 
-        }) 
+        body: JSON.stringify({ properties: { title } })
       })
-
-      if (!createRes.ok) {
-        const errData = await createRes.json()
-        throw new Error(errData.error?.message || `HTTP ${createRes.status}`)
-      }
-
+      
       const createData = await createRes.json()
+      if (createData.error) throw new Error(createData.error.message)
+      
       const spreadsheetId = createData.spreadsheetId
       const firstSheetId = createData.sheets[0].properties.sheetId
 
-      // 2. Перемещаем в папку
+      // 2. Перемещаем в папку (если выбрана)
       if (selectedFolder) {
         await fetch(
           `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
@@ -221,42 +203,67 @@ export default function App() {
         )
       }
 
-      // 3. Заполняем данными
-      if (excelData && excelData.sheets.length > 0 && excelData.sheets[0].data.length > 0) {
+      // 3. Заполняем данными (ТОЛЬКО если есть данные)
+      if (excelData && excelData.sheets.length > 0) {
         const sheet = excelData.sheets[0]
-        const maxCols = Math.max(...sheet.data.map(r => r.length || 1))
+        const rowData = sheet.data
         
-        const requestBody = {
-          requests: [{
+        if (rowData && rowData.length > 0) {
+          // Находим максимальное количество колонок
+          const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
+          
+          // Формируем запрос batchUpdate
+          const requests = [{
             updateCells: {
               range: {
                 sheetId: firstSheetId,
                 startRowIndex: 0,
-                endRowIndex: sheet.data.length,
+                endRowIndex: rowData.length,
                 startColumnIndex: 0,
                 endColumnIndex: maxCols
               },
-              rows: sheet.data.map(row => ({
-                values: row.map(cell => ({
-                  userEnteredValue: { stringValue: String(cell ?? '') }
-                }))
-              })),
+              rows: rowData.map(row => {
+                // Обрабатываем каждую строку
+                if (!row) return { values: [] }
+                return {
+                  values: row.map(cell => {
+                    // Определяем тип значения
+                    if (cell === null || cell === undefined || cell === '') {
+                      return {} // Пустая ячейка
+                    }
+                    if (typeof cell === 'number') {
+                      return { userEnteredValue: { numberValue: cell } }
+                    }
+                    if (typeof cell === 'boolean') {
+                      return { userEnteredValue: { boolValue: cell } }
+                    }
+                    // По умолчанию строка
+                    return { userEnteredValue: { stringValue: String(cell) } }
+                  })
+                }
+              }),
               fields: 'userEnteredValue'
             }
           }]
-        }
 
-        await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestBody)
+          const updateRes = await fetch(
+            `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+            {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ requests })
+            }
+          )
+          
+          const updateData = await updateRes.json()
+          if (updateData.error) {
+            console.warn("Warning during data update:", updateData.error)
+            // Не прерываем процесс, таблица уже создана
           }
-        )
+        }
       }
 
       setResult({
@@ -309,20 +316,13 @@ export default function App() {
         </div>
 
         <div className="bg-white rounded-xl shadow-lg p-6 md:p-8">
-          {!gapiLoaded && !initError && step === 1 && (
+          {!gapiReady && step === 1 && (
              <div className="mb-6 p-4 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-700 text-sm flex items-center">
                <RefreshIcon className="animate-spin mr-2" /> Загрузка сервисов API...
              </div>
           )}
 
-          {initError && step === 1 && (
-             <div className="mb-6 p-4 bg-red-50 border-l-4 border-red-400 text-red-700 text-sm">
-               Ошибка загрузки Google API: {initError}. <br/>
-               <button onClick={() => window.location.reload()} className="underline mt-2 font-bold">Обновить страницу</button>
-             </div>
-          )}
-
-          {step === 1 && gapiLoaded && (
+          {step === 1 && (
             <div>
               <h2 className="text-xl font-semibold text-gray-800 mb-4">Загрузите Excel файл</h2>
               <div 
@@ -341,6 +341,7 @@ export default function App() {
                   </div>
                 </label>
               </div>
+              {error && <div className="mt-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
             </div>
           )}
 
@@ -364,7 +365,7 @@ export default function App() {
                 </div>
               </div>
               {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
-              <button onClick={authenticate} disabled={!gisLoaded} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
+              <button onClick={authenticate} disabled={!gapiReady || !gisReady} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
                 <GoogleIcon className="mr-2" /> Войти через Google
               </button>
             </div>
