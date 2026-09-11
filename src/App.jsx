@@ -93,11 +93,14 @@ export default function App() {
     reader.onload = (e) => {
       try {
         const data = new Uint8Array(e.target.result)
-        const workbook = XLSX.read(data, { type: 'array', cellDates: true })
+        const workbook = XLSX.read(data, { type: 'array' })
+        
+        // Исправлено: добавлен ключ 'data' перед вызовом функции
         const sheets = workbook.SheetNames.map(name => ({
           name,
-           XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
+          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
         }))
+        
         setExcelData({ workbook, sheets })
         setStep(2)
       } catch (err) {
@@ -134,7 +137,7 @@ export default function App() {
           window.gapi.client.setToken({ access_token: response.access_token })
         }
         
-        loadFolders(response.access_token)
+        loadFolders()
         setStep(3)
       },
     })
@@ -142,9 +145,8 @@ export default function App() {
     tokenClient.requestAccessToken()
   }
 
-  const loadFolders = async (token) => {
-    const currentToken = token || accessToken
-    if (!currentToken) {
+  const loadFolders = async () => {
+    if (!accessToken) {
       setError("Нет токена доступа для загрузки папок")
       return
     }
@@ -153,7 +155,7 @@ export default function App() {
         `https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'+and+trashed=false&fields=files(id,name,parents)&spaces=drive`,
         {
           headers: { 
-            'Authorization': `Bearer ${currentToken}`,
+            'Authorization': `Bearer ${accessToken}`,
             'Content-Type': 'application/json'
           }
         }
@@ -166,6 +168,7 @@ export default function App() {
 
       const data = await res.json()
       const files = data.files || []
+      // Фильтруем только корневые папки
       const rootFolders = files.filter(f => !f.parents || f.parents.length === 0 || f.parents[0] === 'root')
       setFolders(rootFolders)
     } catch (err) {
@@ -173,24 +176,6 @@ export default function App() {
       setError("Не удалось загрузить папки: " + err.message)
       setFolders([])
     }
-  }
-
-  const convertCellValue = (cell) => {
-    if (cell === null || cell === undefined || cell === '') {
-      return {}
-    }
-    if (typeof cell === 'number') {
-      return { userEnteredValue: { numberValue: cell } }
-    }
-    if (typeof cell === 'boolean') {
-      return { userEnteredValue: { boolValue: cell } }
-    }
-    if (cell instanceof Date) {
-      // Конвертация даты в формат Excel сериального номера (упрощенно) или строки
-      // Для простоты пока передаем как строку, чтобы избежать ошибок формата
-      return { userEnteredValue: { stringValue: cell.toLocaleDateString('ru-RU') } }
-    }
-    return { userEnteredValue: { stringValue: String(cell) } }
   }
 
   const createGoogleSheet = async () => {
@@ -202,11 +187,10 @@ export default function App() {
     setIsCreating(true)
     setError(null)
     
-    const baseTitle = fileName.replace('.xlsx', '')
-    const title = `${baseTitle} - ${new Date().toLocaleDateString('ru-RU')}`
+    const title = fileName.replace('.xlsx', '') + ' - ' + new Date().toLocaleDateString('ru-RU')
     
     try {
-      // 1. Создаем таблицу с пустым телом, Google сам создаст один лист по умолчанию
+      // 1. Создаем таблицу
       const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
         method: 'POST',
         headers: {
@@ -220,75 +204,10 @@ export default function App() {
       if (createData.error) throw new Error(createData.error.message)
       
       const spreadsheetId = createData.spreadsheetId
-      let sheetIds = []
-      
-      // Получаем ID всех листов (изначально один)
-      const initialSheets = createData.sheets || []
-      initialSheets.forEach((s, idx) => {
-        sheetIds[idx] = s.properties.sheetId
-      })
+      // Получаем ID первого листа (он создается автоматически)
+      let firstSheetId = createData.sheets[0].properties.sheetId
 
-      // 2. Если листов в Excel больше 1, создаем дополнительные листы
-      if (excelData.sheets.length > 1) {
-        const addSheetRequests = []
-        for (let i = 1; i < excelData.sheets.length; i++) {
-          addSheetRequests.push({
-            addSheet: {
-              properties: {
-                title: excelData.sheets[i].name.substring(0, 100),
-                index: i
-              }
-            }
-          })
-        }
-
-        if (addSheetRequests.length > 0) {
-          const addRes = await fetch(
-            `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({ requests: addSheetRequests })
-            }
-          )
-          const addData = await addRes.json()
-          if (addData.error) throw new Error("Ошибка создания листов: " + addData.error.message)
-          
-          // Обновляем список ID листов после добавления
-          const updatedSheets = addData.replies.map(r => r.addSheet?.properties?.sheetId).filter(id => id !== undefined)
-          // Первый лист уже был, добавляем новые
-          sheetIds = [sheetIds[0], ...updatedSheets]
-        }
-      }
-
-      // Переименовываем первый лист, если имя отличается от дефолтного
-      if (excelData.sheets[0].name !== "Sheet1" && excelData.sheets[0].name !== "Лист1") {
-         const renameReq = [{
-            updateSheetProperties: {
-              properties: {
-                sheetId: sheetIds[0],
-                title: excelData.sheets[0].name.substring(0, 100)
-              },
-              fields: "title"
-            }
-         }]
-         await fetch(
-            `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({ requests: renameReq })
-            }
-         )
-      }
-
-      // 3. Перемещаем файл в выбранную папку
+      // 2. Перемещаем в папку (если выбрана)
       if (selectedFolder) {
         const moveRes = await fetch(
           `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
@@ -306,48 +225,149 @@ export default function App() {
         }
       }
 
-      // 4. Заполняем данные по каждому листу
-      // Выполняем запросы последовательно или небольшими пачками, чтобы не превысить лимиты
-      for (let i = 0; i < excelData.sheets.length; i++) {
-        const sheet = excelData.sheets[i]
-        const rowData = sheet.data
-        const sheetId = sheetIds[i]
+      // 3. Подготовка запросов для заполнения данными
+      const requests = []
+      const sheetIds = [] // Храним соответствие индекса листа его ID
 
+      excelData.sheets.forEach((sheet, index) => {
+        let currentSheetId
+        
+        if (index === 0) {
+          // Первый лист уже существует
+          currentSheetId = firstSheetId
+          // Переименовываем первый лист, если имя отличается от стандартного
+          if (sheet.name !== createData.sheets[0].properties.title) {
+            requests.push({
+              updateSheetProperties: {
+                properties: { sheetId: currentSheetId, title: sheet.name.substring(0, 100) },
+                fields: 'title'
+              }
+            })
+          }
+        } else {
+          // Для остальных листов создаем новые
+          // Мы не можем получить ID нового листа до выполнения batchUpdate, 
+          // поэтому используем временную логику: создадим листы, а потом заполним их отдельным запросом,
+          // ИЛИ (проще) сделаем два шага: сначала создадим все листы, потом заполним.
+          // Но API позволяет сделать это в одном запросе, если мы не ссылаемся на новый лист в том же запросе.
+          // Поэтому разобьем на два этапа внутри этой функции для надежности.
+          
+          requests.push({
+            addSheet: {
+              properties: {
+                title: sheet.name.substring(0, 100)
+              }
+            }
+          })
+        }
+        sheetIds.push(currentSheetId) // null для новых листов пока что
+      })
+
+      // Этап А: Создаем недостающие листы и переименовываем первый
+      if (requests.length > 0) {
+        const initRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ requests })
+          }
+        )
+        
+        if (!initRes.ok) {
+           const initErr = await initRes.json()
+           throw new Error("Ошибка инициализации листов: " + (initErr.error?.message || 'Unknown'))
+        }
+
+        const initData = await initRes.json()
+        // Теперь получаем реальные ID созданных листов из ответа
+        const createdReplies = initData.replies
+        let replyIndex = 0
+        
+        // Восстанавливаем IDs
+        excelData.sheets.forEach((sheet, index) => {
+          if (index === 0) {
+             sheetIds[index] = firstSheetId
+          } else {
+             // Находим ответ на addSheet
+             const reply = createdReplies[replyIndex]
+             if (reply && reply.addSheet && reply.addSheet.properties) {
+               sheetIds[index] = reply.addSheet.properties.sheetId
+             }
+             replyIndex++
+          }
+        })
+      } else {
+        sheetIds[0] = firstSheetId
+      }
+
+      // Этап Б: Заполняем данные по всем листам
+      const fillRequests = []
+      
+      excelData.sheets.forEach((sheet, index) => {
+        const currentSheetId = sheetIds[index]
+        const rowData = sheet.data
+        
         if (rowData && rowData.length > 0) {
           const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
           
-          const requests = [{
+          fillRequests.push({
             updateCells: {
               range: {
-                sheetId: sheetId,
+                sheetId: currentSheetId,
                 startRowIndex: 0,
                 endRowIndex: rowData.length,
                 startColumnIndex: 0,
                 endColumnIndex: maxCols
               },
-              rows: rowData.map(row => ({
-                values: row.map(cell => convertCellValue(cell))
-              })),
+              rows: rowData.map(row => {
+                if (!row) return { values: [] }
+                return {
+                  values: row.map(cell => {
+                    if (cell === null || cell === undefined || cell === '') {
+                      return {}
+                    }
+                    if (typeof cell === 'number') {
+                      return { userEnteredValue: { numberValue: cell } }
+                    }
+                    if (typeof cell === 'boolean') {
+                      return { userEnteredValue: { boolValue: cell } }
+                    }
+                    // Проверка на дату (Excel хранит даты как числа, но XLSX может вернуть Date объект)
+                    if (cell instanceof Date) {
+                       // Конвертируем дату в строку или serial number, Google Sheets поймет
+                       // Проще всего передать как строку в формате ГГГГ-ММ-ДД
+                       return { userEnteredValue: { stringValue: cell.toISOString().split('T')[0] } }
+                    }
+                    return { userEnteredValue: { stringValue: String(cell) } }
+                  })
+                }
+              }),
               fields: 'userEnteredValue'
             }
-          }]
+          })
+        }
+      })
 
-          const updateRes = await fetch(
-            `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({ requests })
-            }
-          )
-          
-          const updateData = await updateRes.json()
-          if (updateData.error) {
-            console.warn(`Warning updating sheet ${i}:`, updateData.error)
+      if (fillRequests.length > 0) {
+        const updateRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ requests: fillRequests })
           }
+        )
+        
+        const updateData = await updateRes.json()
+        if (updateData.error) {
+          console.warn("Warning during data update:", updateData.error)
         }
       }
 
@@ -477,7 +497,7 @@ export default function App() {
               {folders.length === 0 ? (
                 <div className="text-center py-6 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-300">
                   <p>Папки не найдены</p>
-                  <button onClick={() => loadFolders(accessToken)} className="mt-2 text-blue-600 text-xs hover:underline">Обновить список</button>
+                  <button onClick={loadFolders} className="mt-2 text-blue-600 text-xs hover:underline">Обновить список</button>
                 </div>
               ) : (
                 <div className="max-h-60 overflow-y-auto mb-6 space-y-2 pr-1">
