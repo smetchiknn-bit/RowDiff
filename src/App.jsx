@@ -29,7 +29,6 @@ export default function App() {
   const [error, setError] = useState(null)
   const [gapiReady, setGapiReady] = useState(false)
   const [gisReady, setGisReady] = useState(false)
-  const [tokenClient, setTokenClient] = useState(null)
 
   // Загрузка скриптов Google
   useEffect(() => {
@@ -46,19 +45,22 @@ export default function App() {
           })
         }
 
-        // Инициализация GAPI клиента
+        // 2. Инициализация GAPI клиента
         await new Promise((resolve) => {
           window.gapi.load('client', () => {
-            // Инициализируем без discoveryDocs, чтобы избежать гонок, будем использовать fetch
             window.gapi.client.init({
               apiKey: GOOGLE_API_KEY,
-              clientId: GOOGLE_CLIENT_ID
-            }).then(resolve).catch(resolve) 
+              clientId: GOOGLE_CLIENT_ID,
+              discoveryDocs: [
+                'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
+                'https://sheets.googleapis.com/$discovery/rest?version=v4'
+              ]
+            }).then(resolve).catch(resolve)
           })
         })
         setGapiReady(true)
 
-        // 2. Загрузка GIS (Google Identity Services)
+        // 3. Загрузка GIS
         if (!window.google || !window.google.accounts) {
           await new Promise((resolve, reject) => {
             const script = document.createElement('script')
@@ -68,36 +70,10 @@ export default function App() {
             document.body.appendChild(script)
           })
         }
-        
-        // Инициализация клиента токенов ТОЛЬКО после загрузки скрипта
-        if (window.google && window.google.accounts && window.google.accounts.oauth2) {
-            const client = window.google.accounts.oauth2.initTokenClient({
-                client_id: GOOGLE_CLIENT_ID,
-                scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
-                callback: (response) => {
-                    if (response.error) {
-                        setError(`Auth Error: ${response.error} - ${response.error_description || ''}`)
-                        return
-                    }
-                    if (response.access_token) {
-                        setAccessToken(response.access_token)
-                        // Токен получен, загружаем папки
-                        loadFolders(response.access_token)
-                        setStep(3)
-                    } else {
-                        setError("Токен не получен. Попробуйте снова.")
-                    }
-                },
-            })
-            setTokenClient(client)
-            setGisReady(true)
-        } else {
-            throw new Error("GIS library loaded but namespace missing")
-        }
-
+        setGisReady(true)
       } catch (err) {
         console.error("Script load error:", err)
-        setError("Ошибка загрузки сервисов Google. Проверьте консоль или отключите блокировщики рекламы.")
+        setError("Ошибка загрузки сервисов Google.")
       }
     }
 
@@ -120,7 +96,7 @@ export default function App() {
         const workbook = XLSX.read(data, { type: 'array' })
         const sheets = workbook.SheetNames.map(name => ({
           name,
-           XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 })
+          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 })
         }))
         setExcelData({ workbook, sheets })
         setStep(2)
@@ -140,58 +116,67 @@ export default function App() {
   }
 
   const authenticate = () => {
-    if (!gisReady || !tokenClient) {
-      setError("Сервисы авторизации еще не готовы. Подождите пару секунд.")
+    if (!gisReady) {
+      setError("Сервисы Google еще не загружены.")
       return
     }
-    // Запрос токена с принудительным показом окна выбора аккаунта если нужно
-    tokenClient.requestAccessToken({ prompt: 'consent' })
+
+    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
+      callback: (response) => {
+        if (response.error) {
+          setError(`Auth Error: ${response.error}`)
+          return
+        }
+        setAccessToken(response.access_token)
+        if (window.gapi && window.gapi.client) {
+          window.gapi.client.setToken({ access_token: response.access_token })
+        }
+        
+        loadFolders()
+        setStep(3)
+      },
+    })
+
+    tokenClient.requestAccessToken()
   }
 
-  const loadFolders = async (token) => {
-    const currentToken = token || accessToken
-    if (!currentToken) {
-        setError("Нет токена для загрузки папок")
-        return
+  const loadFolders = async () => {
+    if (!accessToken) {
+      setError("Нет токена доступа для загрузки папок")
+      return
     }
-
     try {
       const res = await fetch(
         `https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'+and+trashed=false&fields=files(id,name,parents)&spaces=drive`,
         {
           headers: { 
-              Authorization: `Bearer ${currentToken}`,
-              'Content-Type': 'application/json'
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
           }
         }
       )
       
-      if (res.status === 401) {
-          throw new Error("Неверный или истекший токен. Пожалуйста, войдите снова.")
+      if (!res.ok) {
+        const errData = await res.json()
+        throw new Error(errData.error?.message || `HTTP ${res.status}`)
       }
 
       const data = await res.json()
-      if (data.error) throw new Error(data.error.message)
-      
       const files = data.files || []
-      // Фильтруем только корневые папки для простоты
       const rootFolders = files.filter(f => !f.parents || f.parents.length === 0 || f.parents[0] === 'root')
       setFolders(rootFolders)
     } catch (err) {
       console.error("Folder Load Error:", err)
       setError("Не удалось загрузить папки: " + err.message)
       setFolders([])
-      // Если ошибка авторизации, сбрасываем шаг назад
-      if (err.message.includes("authentication")) {
-          setStep(2)
-          setAccessToken(null)
-      }
     }
   }
 
   const createGoogleSheet = async () => {
     if (!accessToken) {
-      setError("Нет токена доступа. Пожалуйста, авторизуйтесь снова.")
+      setError("Нет токена доступа")
       return
     }
     
@@ -224,15 +209,14 @@ export default function App() {
           {
             method: 'PATCH',
             headers: { 
-                Authorization: `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
             }
           }
         )
-        const moveData = await moveRes.json()
-        if (moveData.error) {
-            console.warn("Move warning:", moveData.error)
-            // Не прерываем, таблица создана
+        if (!moveRes.ok) {
+          const moveErr = await moveRes.json()
+          console.warn("Move warning:", moveErr)
         }
       }
 
@@ -301,11 +285,7 @@ export default function App() {
       setStep(4)
     } catch (err) {
       console.error("Create Error:", err)
-      if (err.message.includes("401")) {
-          setError("Сессия истекла. Пожалуйста, обновите страницу и войдите снова.")
-      } else {
-          setError("Ошибка создания: " + err.message)
-      }
+      setError("Ошибка создания: " + err.message)
     } finally {
       setIsCreating(false)
     }
@@ -319,7 +299,6 @@ export default function App() {
     setSelectedFolder(null)
     setResult(null)
     setError(null)
-    // Токен не сбрасываем, чтобы не логиниться заново сразу
   }
 
   return (
@@ -397,7 +376,7 @@ export default function App() {
                 </div>
               </div>
               {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
-              <button onClick={authenticate} disabled={!gisReady || !tokenClient} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
+              <button onClick={authenticate} disabled={!gapiReady || !gisReady} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
                 <GoogleIcon className="mr-2" /> Войти через Google
               </button>
             </div>
@@ -424,7 +403,7 @@ export default function App() {
               {folders.length === 0 ? (
                 <div className="text-center py-6 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-300">
                   <p>Папки не найдены</p>
-                  <button onClick={() => loadFolders()} className="mt-2 text-blue-600 text-xs hover:underline">Обновить список</button>
+                  <button onClick={loadFolders} className="mt-2 text-blue-600 text-xs hover:underline">Обновить список</button>
                 </div>
               ) : (
                 <div className="max-h-60 overflow-y-auto mb-6 space-y-2 pr-1">
