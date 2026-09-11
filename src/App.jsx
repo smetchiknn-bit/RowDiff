@@ -20,47 +20,18 @@ export default function App() {
   const [excelData, setExcelData] = useState(null)
   const [fileName, setFileName] = useState("")
   const [isDragging, setIsDragging] = useState(false)
-  const [isLoading, setIsLoading] = useState(false)
   const [accessToken, setAccessToken] = useState(null)
   const [folders, setFolders] = useState([])
   const [selectedFolder, setSelectedFolder] = useState(null)
   const [isCreating, setIsCreating] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
-  const [gapiReady, setGapiReady] = useState(false)
   const [gisReady, setGisReady] = useState(false)
 
-  // Загрузка скриптов Google
+  // Загрузка только GIS скрипта (GAPI client нам не нужен для инициализации, только для типов)
   useEffect(() => {
     const loadScripts = async () => {
       try {
-        // 1. Загрузка GAPI
-        if (!window.gapi) {
-          await new Promise((resolve, reject) => {
-            const script = document.createElement('script')
-            script.src = 'https://apis.google.com/js/api.js'
-            script.onload = resolve
-            script.onerror = () => reject(new Error("Failed to load gapi"))
-            document.body.appendChild(script)
-          })
-        }
-
-        // 2. Инициализация GAPI клиента
-        await new Promise((resolve) => {
-          window.gapi.load('client', () => {
-            window.gapi.client.init({
-              apiKey: GOOGLE_API_KEY,
-              clientId: GOOGLE_CLIENT_ID,
-              discoveryDocs: [
-                'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
-                'https://sheets.googleapis.com/$discovery/rest?version=v4'
-              ]
-            }).then(resolve).catch(resolve)
-          })
-        })
-        setGapiReady(true)
-
-        // 3. Загрузка GIS
         if (!window.google || !window.google.accounts) {
           await new Promise((resolve, reject) => {
             const script = document.createElement('script')
@@ -76,7 +47,6 @@ export default function App() {
         setError("Ошибка загрузки сервисов Google.")
       }
     }
-
     loadScripts()
   }, [])
 
@@ -86,7 +56,6 @@ export default function App() {
       return
     }
     setError(null)
-    setIsLoading(true)
     setFileName(file.name)
     
     const reader = new FileReader()
@@ -96,14 +65,12 @@ export default function App() {
         const workbook = XLSX.read(data, { type: 'array' })
         const sheets = workbook.SheetNames.map(name => ({
           name,
-          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 })
+           XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 })
         }))
         setExcelData({ workbook, sheets })
         setStep(2)
       } catch (err) {
         setError('Ошибка чтения: ' + err.message)
-      } finally {
-        setIsLoading(false)
       }
     }
     reader.readAsArrayBuffer(file)
@@ -129,12 +96,11 @@ export default function App() {
           setError(`Auth Error: ${response.error}`)
           return
         }
-        setAccessToken(response.access_token)
-        if (window.gapi && window.gapi.client) {
-          window.gapi.client.setToken({ access_token: response.access_token })
-        }
+        const token = response.access_token
+        setAccessToken(token)
         
-        loadFolders()
+        // Передаем токен сразу в функцию загрузки, минуя состояние
+        loadFolders(token)
         setStep(3)
       },
     })
@@ -142,9 +108,10 @@ export default function App() {
     tokenClient.requestAccessToken()
   }
 
-  const loadFolders = async () => {
-    if (!accessToken) {
-      setError("Нет токена доступа для загрузки папок")
+  const loadFolders = async (token) => {
+    const authHeader = token || accessToken
+    if (!authHeader) {
+      setError("Нет токена доступа")
       return
     }
     try {
@@ -152,7 +119,7 @@ export default function App() {
         `https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'+and+trashed=false&fields=files(id,name,parents)&spaces=drive`,
         {
           headers: { 
-            'Authorization': `Bearer ${accessToken}`,
+            'Authorization': `Bearer ${authHeader}`,
             'Content-Type': 'application/json'
           }
         }
@@ -165,6 +132,7 @@ export default function App() {
 
       const data = await res.json()
       const files = data.files || []
+      // Фильтруем корневые папки
       const rootFolders = files.filter(f => !f.parents || f.parents.length === 0 || f.parents[0] === 'root')
       setFolders(rootFolders)
     } catch (err) {
@@ -220,12 +188,13 @@ export default function App() {
         }
       }
 
-      // 3. Заполняем данными
+      // 3. Заполняем данными ИЗ EXCEL
       if (excelData && excelData.sheets.length > 0) {
         const sheet = excelData.sheets[0]
         const rowData = sheet.data
         
         if (rowData && rowData.length > 0) {
+          // Вычисляем максимальное количество колонок во всем листе
           const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
           
           const requests = [{
@@ -250,7 +219,12 @@ export default function App() {
                     if (typeof cell === 'boolean') {
                       return { userEnteredValue: { boolValue: cell } }
                     }
-                    return { userEnteredValue: { stringValue: String(cell) } }
+                    // Формулы или строки
+                    const strVal = String(cell)
+                    if (strVal.startsWith('=')) {
+                       return { userEnteredValue: { formulaValue: strVal } }
+                    }
+                    return { userEnteredValue: { stringValue: strVal } }
                   })
                 }
               }),
@@ -272,7 +246,7 @@ export default function App() {
           
           const updateData = await updateRes.json()
           if (updateData.error) {
-            console.warn("Warning during data update:", updateData.error)
+            throw new Error("Таблица создана, но данные не записаны: " + updateData.error.message)
           }
         }
       }
@@ -285,7 +259,7 @@ export default function App() {
       setStep(4)
     } catch (err) {
       console.error("Create Error:", err)
-      setError("Ошибка создания: " + err.message)
+      setError("Ошибка: " + err.message)
     } finally {
       setIsCreating(false)
     }
@@ -299,6 +273,7 @@ export default function App() {
     setSelectedFolder(null)
     setResult(null)
     setError(null)
+    setAccessToken(null)
   }
 
   return (
@@ -306,7 +281,7 @@ export default function App() {
       <div className="max-w-2xl mx-auto">
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-gray-800 mb-2">Excel → Google Sheets</h1>
-          <p className="text-gray-600">Конвертируйте Excel файлы в Google Таблицы</p>
+          <p className="text-gray-600">Перенос данных с сохранением структуры</p>
         </div>
         
         {/* Progress */}
@@ -327,15 +302,15 @@ export default function App() {
         </div>
 
         <div className="bg-white rounded-xl shadow-lg p-6 md:p-8">
-          {!gapiReady && step === 1 && (
+          {!gisReady && step === 1 && (
              <div className="mb-6 p-4 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-700 text-sm flex items-center">
-               <RefreshIcon className="animate-spin mr-2" /> Загрузка сервисов API...
+               <RefreshIcon className="animate-spin mr-2" /> Загрузка Google сервисов...
              </div>
           )}
 
           {step === 1 && (
             <div>
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Загрузите Excel файл</h2>
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">1. Загрузите Excel файл</h2>
               <div 
                 onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }} 
                 onDragLeave={() => setIsDragging(false)} 
@@ -358,14 +333,15 @@ export default function App() {
 
           {step === 2 && excelData && (
             <div>
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Файл готов</h2>
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">2. Файл готов</h2>
               <div className="bg-gray-50 rounded-lg p-4 mb-6">
                 <div className="flex items-center mb-3">
                   <FileIcon className="mr-3 text-blue-600" />
                   <span className="font-medium text-gray-800 truncate">{fileName}</span>
                 </div>
                 <div className="text-sm text-gray-600">
-                  <p className="mb-2">Листов: <strong>{excelData.sheets.length}</strong></p>
+                  <p className="mb-2">Найдено листов: <strong>{excelData.sheets.length}</strong></p>
+                  <p className="mb-2">Строк данных: <strong>{excelData.sheets[0].data.length}</strong></p>
                   <div className="flex flex-wrap gap-2">
                     {excelData.sheets.map((s, i) => (
                       <span key={i} className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs flex items-center">
@@ -376,15 +352,15 @@ export default function App() {
                 </div>
               </div>
               {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
-              <button onClick={authenticate} disabled={!gapiReady || !gisReady} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                <GoogleIcon className="mr-2" /> Войти через Google
+              <button onClick={authenticate} disabled={!gisReady} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
+                <GoogleIcon className="mr-2" /> Войти через Google и выбрать папку
               </button>
             </div>
           )}
 
           {step === 3 && (
             <div>
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Куда сохранить?</h2>
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">3. Куда сохранить?</h2>
               
               <button 
                 onClick={() => setSelectedFolder(null)} 
@@ -402,8 +378,8 @@ export default function App() {
               
               {folders.length === 0 ? (
                 <div className="text-center py-6 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-300">
-                  <p>Папки не найдены</p>
-                  <button onClick={loadFolders} className="mt-2 text-blue-600 text-xs hover:underline">Обновить список</button>
+                  <p>Список папок пуст</p>
+                  <button onClick={() => loadFolders(accessToken)} className="mt-2 text-blue-600 text-xs hover:underline">Обновить список</button>
                 </div>
               ) : (
                 <div className="max-h-60 overflow-y-auto mb-6 space-y-2 pr-1">
@@ -419,7 +395,7 @@ export default function App() {
               
               {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
               <button onClick={createGoogleSheet} disabled={isCreating} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                {isCreating ? <><RefreshIcon className="animate-spin mr-2" /> Создание...</> : <><SheetIcon className="mr-2" /> Создать таблицу</>}
+                {isCreating ? <><RefreshIcon className="animate-spin mr-2" /> Обработка и создание...</> : <><SheetIcon className="mr-2" /> Создать таблицу с данными</>}
               </button>
             </div>
           )}
@@ -429,8 +405,8 @@ export default function App() {
               <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <CheckIcon className="text-green-600 w-8 h-8" />
               </div>
-              <h2 className="text-xl font-semibold text-gray-800 mb-2">Готово!</h2>
-              <p className="text-gray-600 mb-6">{result.title}</p>
+              <h2 className="text-xl font-semibold text-gray-800 mb-2">Успешно!</h2>
+              <p className="text-gray-600 mb-6">Данные из Excel перенесены в <strong>{result.title}</strong></p>
               <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex items-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors mb-4 shadow-md">
                 <GoogleIcon className="mr-2" /> Открыть таблицу <ArrowRightIcon className="ml-2 w-4 h-4"/>
               </a>
@@ -444,7 +420,7 @@ export default function App() {
         </div>
         
         <div className="mt-6 text-center text-xs text-gray-500 flex items-center justify-center">
-          <LockIcon className="inline-block mr-1 w-3 h-3" /> Данные обрабатываются локально и передаются только в Google
+          <LockIcon className="inline-block mr-1 w-3 h-3" /> Безопасная передача данных через Google API
         </div>
       </div>
     </div>
