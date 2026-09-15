@@ -95,7 +95,7 @@ export default function App() {
         const data = new Uint8Array(e.target.result)
         const workbook = XLSX.read(data, { type: 'array' })
         
-        // ИСПРАВЛЕНО: Добавлен ключ 'data'
+        // Исправлено: добавлен ключ 'data'
         const sheets = workbook.SheetNames.map(name => ({
           name,
           data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
@@ -203,12 +203,11 @@ export default function App() {
       if (createData.error) throw new Error(createData.error.message)
       
       const spreadsheetId = createData.spreadsheetId
-      let firstSheetId = createData.sheets[0].properties.sheetId
-
+      
       // 2. Перемещаем в папку (если выбрана)
       if (selectedFolder) {
         const moveRes = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
+          `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&removeParents=root&fields=id,parents`,
           {
             method: 'PATCH',
             headers: { 
@@ -223,132 +222,57 @@ export default function App() {
         }
       }
 
-      // 3. Подготовка запросов для создания листов
-      const requests = []
-      const sheetIds = [] 
-
-      excelData.sheets.forEach((sheet, index) => {
-        let currentSheetId
-        
-        if (index === 0) {
-          currentSheetId = firstSheetId
-          if (sheet.name !== createData.sheets[0].properties.title) {
-            requests.push({
-              updateSheetProperties: {
-                properties: { sheetId: currentSheetId, title: sheet.name.substring(0, 100) },
-                fields: 'title'
-              }
-            })
-          }
-        } else {
-          requests.push({
-            addSheet: {
-              properties: { title: sheet.name.substring(0, 100) }
-            }
-          })
-        }
-        sheetIds.push(currentSheetId)
-      })
-
-      // Этап А: Создаем листы
-      if (requests.length > 0) {
-        const initRes = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ requests })
-          }
-        )
-        
-        if (!initRes.ok) {
-           const initErr = await initRes.json()
-           throw new Error("Ошибка инициализации листов: " + (initErr.error?.message || 'Unknown'))
-        }
-
-        const initData = await initRes.json()
-        const createdReplies = initData.replies
-        let replyIndex = 0
-        
-        excelData.sheets.forEach((sheet, index) => {
-          if (index === 0) {
-             sheetIds[index] = firstSheetId
-          } else {
-             const reply = createdReplies[replyIndex]
-             if (reply && reply.addSheet && reply.addSheet.properties) {
-               sheetIds[index] = reply.addSheet.properties.sheetId
-             }
-             replyIndex++
-          }
-        })
-      } else {
-        sheetIds[0] = firstSheetId
-      }
-
-      // Этап Б: Заполняем данные
-      const fillRequests = []
+      // 3. Подготовка данных для отправки (ФИЛЬТРАЦИЯ КОЛОНКИ A)
+      const valuesPayload = []
       
       excelData.sheets.forEach((sheet, index) => {
-        const currentSheetId = sheetIds[index]
-        const rowData = sheet.data
+        let rowData = sheet.data || []
         
-        if (rowData && rowData.length > 0) {
-          const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
-          
-          fillRequests.push({
-            updateCells: {
-              range: {
-                sheetId: currentSheetId,
-                startRowIndex: 0,
-                endRowIndex: rowData.length,
-                startColumnIndex: 0,
-                endColumnIndex: maxCols
-              },
-              rows: rowData.map(row => {
-                if (!row) return { values: [] }
-                return {
-                  values: row.map(cell => {
-                    if (cell === null || cell === undefined || cell === '') {
-                      return {}
-                    }
-                    if (typeof cell === 'number') {
-                      return { userEnteredValue: { numberValue: cell } }
-                    }
-                    if (typeof cell === 'boolean') {
-                      return { userEnteredValue: { boolValue: cell } }
-                    }
-                    if (cell instanceof Date) {
-                       return { userEnteredValue: { stringValue: cell.toISOString().split('T')[0] } }
-                    }
-                    return { userEnteredValue: { stringValue: String(cell) } }
-                  })
-                }
-              }),
-              fields: 'userEnteredValue'
-            }
-          })
-        }
+        if (rowData.length === 0) return
+
+        // ФИЛЬТР: Если первая ячейка первой строки содержит "timestamp", удаляем первую колонку
+        const firstCell = rowData[0][0]
+        const shouldRemoveFirstCol = typeof firstCell === 'string' && firstCell.toLowerCase().includes('timestamp')
+
+        const processedRows = rowData.map(row => {
+          if (!row) return []
+          // Если нужно удалить первую колонку, берем срез массива с 1 элемента
+          if (shouldRemoveFirstCol) {
+            return row.slice(1)
+          }
+          return row
+        })
+
+        // Формируем диапазон (например, "Лист1!A1")
+        const range = `${sheet.name}!A1`
+        
+        valuesPayload.push({
+          range: range,
+          values: processedRows
+        })
       })
 
-      if (fillRequests.length > 0) {
+      // 4. Отправка данных одним надежным запросом values:batchUpdate
+      if (valuesPayload.length > 0) {
         const updateRes = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
           {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${accessToken}`,
               'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ requests: fillRequests })
+            body: JSON.stringify({
+              valueInputOption: 'USER_ENTERED', // Позволяет Google самим определить формат (число, дата, текст)
+              data: valuesPayload
+            })
           }
         )
         
         const updateData = await updateRes.json()
         if (updateData.error) {
-          console.warn("Warning during data update:", updateData.error)
+          console.error("Batch Update Error:", updateData.error)
+          throw new Error("Ошибка записи данных: " + updateData.error.message)
         }
       }
 
