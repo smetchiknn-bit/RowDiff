@@ -74,7 +74,6 @@ export default function App() {
         setError("Ошибка загрузки сервисов Google.")
       }
     }
-
     loadScripts()
   }, [])
 
@@ -133,7 +132,6 @@ export default function App() {
         if (window.gapi && window.gapi.client) {
           window.gapi.client.setToken({ access_token: response.access_token })
         }
-        
         loadFolders()
         setStep(3)
       },
@@ -174,35 +172,6 @@ export default function App() {
     }
   }
 
-  // Функция скачивания Excel
-  const downloadExcel = () => {
-    if (!excelData || !excelData.sheets) return
-    
-    try {
-      const wb = XLSX.utils.book_new()
-      
-      excelData.sheets.forEach(sheet => {
-        // Очищаем данные от null/undefined перед записью
-        const cleanData = sheet.data.map(row => 
-          row.map(cell => {
-            if (cell === null || cell === undefined) return ""
-            if (cell instanceof Date) return cell.toISOString().split('T')[0]
-            return cell
-          })
-        )
-        
-        const ws = XLSX.utils.aoa_to_sheet(cleanData)
-        XLSX.utils.book_append_sheet(wb, ws, sheet.name.substring(0, 31))
-      })
-      
-      const newName = fileName.replace('.xlsx', '') + '_processed.xlsx'
-      XLSX.writeFile(wb, newName)
-    } catch (err) {
-      console.error("Download error:", err)
-      setError("Ошибка при скачивании файла: " + err.message)
-    }
-  }
-
   const createGoogleSheet = async () => {
     if (!accessToken) {
       setError("Нет токена доступа")
@@ -233,7 +202,7 @@ export default function App() {
 
       // 2. Перемещаем в папку (если выбрана)
       if (selectedFolder) {
-        const moveRes = await fetch(
+        await fetch(
           `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
           {
             method: 'PATCH',
@@ -243,25 +212,19 @@ export default function App() {
             }
           }
         )
-        if (!moveRes.ok) {
-          const moveErr = await moveRes.json()
-          console.warn("Move warning:", moveErr)
-        }
       }
 
-      // 3. Подготовка запросов для заполнения данными
+      // 3. Подготовка запросов для создания листов
       const requests = []
       const sheetIds = [] 
 
       excelData.sheets.forEach((sheet, index) => {
-        let currentSheetId
-        
         if (index === 0) {
-          currentSheetId = firstSheetId
+          sheetIds.push(firstSheetId)
           if (sheet.name !== createData.sheets[0].properties.title) {
             requests.push({
               updateSheetProperties: {
-                properties: { sheetId: currentSheetId, title: sheet.name.substring(0, 100) },
+                properties: { sheetId: firstSheetId, title: sheet.name.substring(0, 100) },
                 fields: 'title'
               }
             })
@@ -273,10 +236,9 @@ export default function App() {
             }
           })
         }
-        sheetIds.push(currentSheetId)
       })
 
-      // Этап А: Создаем недостающие листы и переименовываем первый
+      // Этап А: Создаем/переименовываем листы
       if (requests.length > 0) {
         const initRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
@@ -314,7 +276,7 @@ export default function App() {
         sheetIds[0] = firstSheetId
       }
 
-      // Этап Б: Заполняем данные по всем листам
+      // Этап Б: Заполняем данные
       const fillRequests = []
       
       excelData.sheets.forEach((sheet, index) => {
@@ -322,42 +284,35 @@ export default function App() {
         const rowData = sheet.data
         
         if (rowData && rowData.length > 0) {
-          // Находим максимальную ширину строки
-          const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
+          // Нормализация данных: замена null/undefined на пустые строки, обработка дат
+          const normalizedRows = rowData.map(row => {
+            if (!row) return []
+            return row.map(cell => {
+              if (cell === null || cell === undefined) return ""
+              if (cell instanceof Date) return cell.toISOString().split('T')[0]
+              return cell
+            })
+          })
+
+          const maxCols = Math.max(...normalizedRows.map(r => r.length), 1)
           
           fillRequests.push({
             updateCells: {
               range: {
                 sheetId: currentSheetId,
                 startRowIndex: 0,
-                endRowIndex: rowData.length,
+                endRowIndex: normalizedRows.length,
                 startColumnIndex: 0,
                 endColumnIndex: maxCols
               },
-              rows: rowData.map(row => {
-                if (!row) return { values: [] }
-                // Убедимся, что длина строки равна maxCols
-                const paddedRow = [...row]
-                while(paddedRow.length < maxCols) paddedRow.push("")
-                
-                return {
-                  values: paddedRow.map(cell => {
-                    if (cell === null || cell === undefined || cell === '') {
-                      return {}
-                    }
-                    if (typeof cell === 'number') {
-                      return { userEnteredValue: { numberValue: cell } }
-                    }
-                    if (typeof cell === 'boolean') {
-                      return { userEnteredValue: { boolValue: cell } }
-                    }
-                    if (cell instanceof Date) {
-                       return { userEnteredValue: { stringValue: cell.toISOString().split('T')[0] } }
-                    }
-                    return { userEnteredValue: { stringValue: String(cell) } }
-                  })
-                }
-              }),
+              rows: normalizedRows.map(row => ({
+                values: row.map(cell => {
+                  if (cell === "") return {}
+                  if (typeof cell === 'number') return { userEnteredValue: { numberValue: cell } }
+                  if (typeof cell === 'boolean') return { userEnteredValue: { boolValue: cell } }
+                  return { userEnteredValue: { stringValue: String(cell) } }
+                })
+              })),
               fields: 'userEnteredValue'
             }
           })
@@ -395,6 +350,26 @@ export default function App() {
     } finally {
       setIsCreating(false)
     }
+  }
+
+  const downloadExcel = () => {
+    if (!excelData) return
+    
+    // Создаем новую книгу
+    const wb = XLSX.utils.book_new()
+    
+    // Добавляем каждый лист
+    excelData.sheets.forEach(sheet => {
+      // Преобразуем массив массивов обратно в лист
+      const ws = XLSX.utils.aoa_to_sheet(sheet.data)
+      XLSX.utils.book_append_sheet(wb, ws, sheet.name)
+    })
+    
+    // Генерируем имя файла
+    const exportName = fileName.replace('.xlsx', '_processed.xlsx')
+    
+    // Скачиваем файл
+    XLSX.writeFile(wb, exportName)
   }
 
   const resetApp = () => {
@@ -538,7 +513,7 @@ export default function App() {
               <h2 className="text-xl font-semibold text-gray-800 mb-2">Готово!</h2>
               <p className="text-gray-600 mb-6">{result.title}</p>
               
-              <div className="flex flex-col sm:flex-row gap-4 justify-center mb-4">
+              <div className="flex flex-col gap-3 max-w-xs mx-auto">
                 <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md">
                   <GoogleIcon className="mr-2" /> Открыть Google Таблицу <ArrowRightIcon className="ml-2 w-4 h-4"/>
                 </a>
@@ -548,7 +523,7 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="pt-4 border-t">
+              <div className="pt-6 border-t mt-6">
                 <button onClick={resetApp} className="text-gray-600 hover:text-gray-800 text-sm font-medium flex items-center mx-auto">
                   <RefreshIcon className="mr-2" /> Конвертировать другой файл
                 </button>
