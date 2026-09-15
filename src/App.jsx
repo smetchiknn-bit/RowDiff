@@ -73,7 +73,6 @@ export default function App() {
         setError("Ошибка загрузки сервисов Google.")
       }
     }
-
     loadScripts()
   }, [])
 
@@ -133,7 +132,6 @@ export default function App() {
         if (window.gapi && window.gapi.client) {
           window.gapi.client.setToken({ access_token: response.access_token })
         }
-        
         loadFolders()
         setStep(3)
       },
@@ -202,9 +200,9 @@ export default function App() {
       const spreadsheetId = createData.spreadsheetId
       let firstSheetId = createData.sheets[0].properties.sheetId
 
-      // 2. Перемещаем в папку
+      // 2. Перемещаем в папку (если выбрана)
       if (selectedFolder) {
-        await fetch(
+        const moveRes = await fetch(
           `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
           {
             method: 'PATCH',
@@ -214,13 +212,19 @@ export default function App() {
             }
           }
         )
+        if (!moveRes.ok) {
+          const moveErr = await moveRes.json()
+          console.warn("Move warning:", moveErr)
+        }
       }
 
-      // 3. Подготовка запросов
+      // 3. Подготовка запросов для заполнения данными
       const requests = []
-      const sheetIds = []
+      const sheetIds = [] 
 
       excelData.sheets.forEach((sheet, index) => {
+        let currentSheetId
+        
         if (index === 0) {
           currentSheetId = firstSheetId
           if (sheet.name !== createData.sheets[0].properties.title) {
@@ -238,10 +242,10 @@ export default function App() {
             }
           })
         }
-        sheetIds.push(index === 0 ? firstSheetId : null)
+        sheetIds.push(currentSheetId)
       })
 
-      // Этап А: Создаем листы
+      // Этап А: Создаем недостающие листы и переименовываем первый
       if (requests.length > 0) {
         const initRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
@@ -255,16 +259,20 @@ export default function App() {
           }
         )
         
-        if (!initRes.ok) throw new Error("Ошибка инициализации листов")
+        if (!initRes.ok) {
+           const initErr = await initRes.json()
+           throw new Error("Ошибка инициализации листов: " + (initErr.error?.message || 'Unknown'))
+        }
 
         const initData = await initRes.json()
+        const createdReplies = initData.replies
         let replyIndex = 0
         
         excelData.sheets.forEach((sheet, index) => {
           if (index === 0) {
              sheetIds[index] = firstSheetId
           } else {
-             const reply = initData.replies[replyIndex]
+             const reply = createdReplies[replyIndex]
              if (reply && reply.addSheet && reply.addSheet.properties) {
                sheetIds[index] = reply.addSheet.properties.sheetId
              }
@@ -275,7 +283,7 @@ export default function App() {
         sheetIds[0] = firstSheetId
       }
 
-      // Этап Б: Заполняем данные
+      // Этап Б: Заполняем данные по всем листам
       const fillRequests = []
       
       excelData.sheets.forEach((sheet, index) => {
@@ -283,31 +291,37 @@ export default function App() {
         const rowData = sheet.data
         
         if (rowData && rowData.length > 0) {
-          // Очистка данных от undefined/null
-          const cleanRowData = rowData.map(row => 
-            row ? row.map(cell => (cell === null || cell === undefined) ? "" : cell) : []
-          )
-
-          const maxCols = Math.max(...cleanRowData.map(r => r.length), 1)
+          const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
           
           fillRequests.push({
             updateCells: {
               range: {
                 sheetId: currentSheetId,
                 startRowIndex: 0,
-                endRowIndex: cleanRowData.length,
+                endRowIndex: rowData.length,
                 startColumnIndex: 0,
                 endColumnIndex: maxCols
               },
-              rows: cleanRowData.map(row => ({
-                values: row.map(cell => {
-                  if (cell === "") return {}
-                  if (typeof cell === 'number') return { userEnteredValue: { numberValue: cell } }
-                  if (typeof cell === 'boolean') return { userEnteredValue: { boolValue: cell } }
-                  if (cell instanceof Date) return { userEnteredValue: { stringValue: cell.toISOString().split('T')[0] } }
-                  return { userEnteredValue: { stringValue: String(cell) } }
-                })
-              })),
+              rows: rowData.map(row => {
+                if (!row) return { values: [] }
+                return {
+                  values: row.map(cell => {
+                    if (cell === null || cell === undefined || cell === '') {
+                      return {}
+                    }
+                    if (typeof cell === 'number') {
+                      return { userEnteredValue: { numberValue: cell } }
+                    }
+                    if (typeof cell === 'boolean') {
+                      return { userEnteredValue: { boolValue: cell } }
+                    }
+                    if (cell instanceof Date) {
+                       return { userEnteredValue: { stringValue: cell.toISOString().split('T')[0] } }
+                    }
+                    return { userEnteredValue: { stringValue: String(cell) } }
+                  })
+                }
+              }),
               fields: 'userEnteredValue'
             }
           })
@@ -315,7 +329,7 @@ export default function App() {
       })
 
       if (fillRequests.length > 0) {
-        await fetch(
+        const updateRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
           {
             method: 'POST',
@@ -326,6 +340,11 @@ export default function App() {
             body: JSON.stringify({ requests: fillRequests })
           }
         )
+        
+        const updateData = await updateRes.json()
+        if (updateData.error) {
+          console.warn("Warning during data update:", updateData.error)
+        }
       }
 
       setResult({
@@ -409,7 +428,6 @@ export default function App() {
                 <input type="file" accept=".xlsx" onChange={(e) => handleFile(e.target.files[0])} className="hidden" id="fileInput" />
                 <label htmlFor="fileInput" className="cursor-pointer block">
                   <div className="flex flex-col items-center">
-                    {/* Логотип */}
                     <img src="/logo.png" alt="Logo" className="w-24 h-24 mb-4 object-contain" />
                     <p className="text-lg font-medium text-gray-700 mb-2">Перетащите файл сюда</p>
                     <p className="text-sm text-gray-500 mb-4">или нажмите для выбора</p>
