@@ -98,7 +98,7 @@ export default function App() {
         // ИСПРАВЛЕНО: Добавлен ключ 'data'
         const sheets = workbook.SheetNames.map(name => ({
           name,
-           XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
+          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
         }))
         
         setExcelData({ workbook, sheets })
