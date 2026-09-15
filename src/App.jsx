@@ -16,173 +16,9 @@ const ArrowRightIcon = () => <svg width="20" height="20" viewBox="0 0 24 24" fil
 const RefreshIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
 const DownloadIcon = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
 
-// === ЛОГИКА МАКРОСА (Константы и функции) ===
-
-// Соответствие заголовков (VOR -> Шаблон)
-const HEADERS_VOR = [
-  "ИД Проект", "ИД Город", "ИД Регион", "Дата Расч", "ИД Объект", "ИД Корпус",
-  "ИД Секция", "Имя Секция", "ИД Уровень", "Имя уровень", "ИД Этаж", "Имя Этаж",
-  "ИД Помещ", "ИД Зона", "ИД ССР", "ИД Группы", "ИД ТМЦ", "ИД КЕР",
-  "Наименование КЕР_ТМЦ", "ЕдИзм КЕР_ТМЦ", "Расход ТМЦ", "К_во КЕР_ТМЦ",
-  "Фильтр ГР", "Фильтр КЕР", "Фильтр ТМЦ", "ИД КЕР1", "КЕР в СР",
-  "ИД ГР в ИД КЕР сорт", "ИД ГР в ИД КЕР", "ИД КЕР в ИД ТМЦ", "ИД КЕР в СР в ИД ТМЦ"
-];
-
-const HEADERS_TEMPLATE = [
-  "ИД Проект", "ИД Город", "ИД Регион", "Дата Расч", "ИД Объект", "ИД Корпус",
-  "ИД Секция", "Имя Секция", "ИД Уровень", "Имя Уровень", "ИД Этаж", "Имя Этаж",
-  "ИД Помещ", "ИД Зона", "ИД ССР", "ИД Группы", "ИД ТМЦ", "ИД КЕР",
-  "Наименование КЕР_ТМЦ", "ЕдИзм КЕР_ТМЦ", "Расход ТМЦ", "Было К_во КЕР_ТМЦ", // Колонка 22 (V) -> AF
-  "Фильтр ГР", "Фильтр КЕР", "Фильтр ТМЦ", "ИД КЕР1", "КЕР в СР",
-  "ИД ГР в ИД КЕР сорт", "ИД ГР в ИД КЕР", "ИД КЕР в ИД ТМЦ", "ИД КЕР в СР в ИД ТМЦ"
-];
-
-// Индексы колонок (0-based) для специальных операций
-const COL_DATE_INDEX = 3; // D
-const COL_V_INDEX = 21;   // V (К_во)
-const COL_AF_INDEX = 31;  // AF (Было К_во) - добавляем как новую
-const COL_AC_INDEX = 28;  // AC (для извлечения префикса)
-const FILL_RANGE_END = 13; // N (для заполнения пустот вверх)
-
-function cleanHeader(str) {
-  if (!str) return "";
-  return String(str).trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
-function extractBeforeDelimiter(val, delimiter) {
-  if (!val) return "";
-  const str = String(val);
-  const idx = str.indexOf(delimiter);
-  return idx > -1 ? str.substring(0, idx).trim() : str.trim();
-}
-
-function processExcelData(sheets) {
-  // Обрабатываем первый лист (предполагаем, что данные там)
-  if (!sheets || sheets.length === 0) return sheets;
-
-  const sheet = sheets[0];
-  const rawData = sheet.data;
-  
-  if (!rawData || rawData.length < 2) return sheets;
-
-  // 1. Обработка заголовков (строка 0)
-  const headers = rawData[0];
-  const headerMap = {}; // Старое имя -> Новое имя
-  const colIndexMap = {}; // Старое имя -> Индекс
-
-  // Строим карту соответствия
-  HEADERS_VOR.forEach((hVor, idx) => {
-    const cleanVor = cleanHeader(hVor);
-    // Ищем этот заголовок в файле
-    const foundIdx = headers.findIndex(h => cleanHeader(h) === cleanVor);
-    if (foundIdx !== -1) {
-      headerMap[foundIdx] = HEADERS_TEMPLATE[idx];
-      colIndexMap[cleanVor] = foundIdx;
-    }
-  });
-
-  // Создаем новую строку заголовков
-  const newHeaders = [];
-  // Заполняем новыми именами там, где нашли совпадения, остальные оставляем или пропускаем
-  // Для простоты создадим массив нужной ширины (32 колонки A-AF)
-  for (let i = 0; i < 32; i++) {
-     // Находим, какой индекс исходного файла соответствует этому шаблону
-     // Это обратный маппинг для формирования строки
-     let val = "";
-     const templateHeader = HEADERS_TEMPLATE[i];
-     const vorHeader = HEADERS_VOR[i];
-     const cleanVor = cleanHeader(vorHeader);
-     
-     const srcIdx = headers.findIndex(h => cleanHeader(h) === cleanVor);
-     if (srcIdx !== -1) {
-       newHeaders.push(templateHeader);
-     } else {
-       newHeaders.push(templateHeader); // Все равно пишем заголовок шаблона
-     }
-  }
-
-  // 2. Обработка данных (строки 1+)
-  const processedRows = [];
-  
-  // Предварительный проход для определения последней строки и сбора данных
-  // Нам нужно реализовать логику "Заполнение пустых ячеек ВВЕРХ" (Fill Up From Below)
-  // Для этого удобно сначала собрать колонки отдельно, обработать их, а потом собрать обратно
-  
-  const maxCols = Math.max(newHeaders.length, ...rawData.slice(1).map(r => r ? r.length : 0));
-  const rowCount = rawData.length - 1;
-  
-  // Транспонируем данные для удобства обработки колонок (только до колонки N для FillUp)
-  // Но проще пройтись снизу вверх по строкам для колонок A-N
-  
-  // Копируем данные в новую структуру
-  let tempData = rawData.slice(1).map(row => {
-    if (!row) return new Array(maxCols).fill("");
-    // Расширяем ряд до maxCols
-    const newRow = [...row];
-    while (newRow.length < maxCols) newRow.push("");
-    return newRow;
-  });
-
-  // === ШАГ ЗАПОЛНЕНИЯ ПУСТОТ ВВЕРХ (A-N) ===
-  // Проходим с предпоследней строки до 0
-  for (let c = 0; c <= FILL_RANGE_END; c++) {
-    for (let r = tempData.length - 2; r >= 0; r--) {
-      if ((tempData[r][c] === "" || tempData[r][c] === null || tempData[r][c] === undefined) && 
-          tempData[r+1][c] !== "" && tempData[r+1][c] !== null) {
-        tempData[r][c] = tempData[r+1][c];
-      }
-    }
-  }
-
-  // === ФОРМИРОВАНИЕ ФИНАЛЬНОГО МАССИВА ===
-  tempData.forEach((row, rIdx) => {
-    const newRow = new Array(32).fill(""); // A-AF
-    
-    // Маппинг значений
-    HEADERS_VOR.forEach((hVor, idxTemplate) => {
-      const cleanVor = cleanHeader(hVor);
-      const srcIdx = headers.findIndex(h => cleanHeader(h) === cleanVor);
-      
-      if (srcIdx !== -1) {
-        let val = row[srcIdx];
-        
-        // Специальная обработка даты (колонка D, индекс 3)
-        if (idxTemplate === COL_DATE_INDEX && val) {
-           // Если это число Excel, конвертируем. Если строка - оставляем.
-           // XLSX обычно парсит даты как Date объекты или числа.
-           if (typeof val === 'number') {
-             // Конвертация Excel serial date to JS Date string DD.MM.YYYY
-             const date = new Date(Math.round((val - 25569)*86400*1000));
-             val = date.toLocaleDateString('ru-RU');
-           } else if (val instanceof Date) {
-             val = val.toLocaleDateString('ru-RU');
-           }
-        }
-        
-        newRow[idxTemplate] = val;
-      }
-    });
-
-    // === КОПИРОВАНИЕ V -> AF ===
-    // V это индекс 21 в шаблоне, AF это индекс 31
-    if (newRow[COL_V_INDEX] !== "" && newRow[COL_V_INDEX] !== null) {
-      newRow[COL_AF_INDEX] = newRow[COL_V_INDEX];
-    }
-
-    processedRows.push(newRow);
-  });
-
-  // Возвращаем обработанный лист
-  return [{
-    name: "БылоСтало",
-    data: [newHeaders, ...processedRows]
-  }];
-}
-
 export default function App() {
   const [step, setStep] = useState(1)
-  const [excelData, setExcelData] = useState(null) // Исходные данные
-  const [processedData, setProcessedData] = useState(null) // Обработанные данные (как макросом)
+  const [excelData, setExcelData] = useState(null) // Здесь храним очищенные данные
   const [fileName, setFileName] = useState("")
   const [isDragging, setIsDragging] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -255,21 +91,59 @@ export default function App() {
     reader.onload = (e) => {
       try {
         const data = new Uint8Array(e.target.result)
-        const workbook = XLSX.read(data, { type: 'array', cellDates: true })
+        // Читаем с опциями: даты как даты, пустые ячейки как пустые строки
+        const workbook = XLSX.read(data, { 
+          type: 'array',
+          cellDates: true, 
+          defval: "" 
+        })
         
-        const sheets = workbook.SheetNames.map(name => ({
-          name,
-          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
-        }))
+        // Обрабатываем каждый лист
+        const sheets = workbook.SheetNames.map(name => {
+          const worksheet = workbook.Sheets[name]
+          // Конвертируем в массив массивов (header: 1)
+          const rawData = XLSX.utils.sheet_to_json(worksheet, { 
+            header: 1, 
+            defval: "", 
+            raw: false // Получаем отформатированные значения (строки), а не сырые коды
+          })
+
+          // Глубокая очистка данных для Google API
+          const cleanedData = rawData.map(row => {
+            if (!row) return []
+            return row.map(cell => {
+              if (cell === null || cell === undefined) return ""
+              if (cell instanceof Date) {
+                // Форматируем дату в YYYY-MM-DD для Google Sheets
+                const year = cell.getFullYear()
+                const month = String(cell.getMonth() + 1).padStart(2, '0')
+                const day = String(cell.getDate()).padStart(2, '0')
+                return `${year}-${month}-${day}`
+              }
+              return String(cell)
+            })
+          })
+
+          // Выравниваем длину строк (чтобы матрица была прямоугольной)
+          const maxLen = Math.max(...cleanedData.map(r => r.length), 0)
+          const normalizedData = cleanedData.map(row => {
+            if (row.length < maxLen) {
+              return [...row, ...Array(maxLen - row.length).fill("")]
+            }
+            return row
+          })
+
+          return {
+            name,
+             normalizedData
+          }
+        })
         
-        // Применяем логику макроса
-        const processed = processExcelData(sheets)
-        
-        setExcelData({ workbook, sheets }) // Сохраняем оригинал (на всякий случай)
-        setProcessedData(processed) // Сохраняем обработанный вариант
+        setExcelData({ sheets: sheets })
         setStep(2)
       } catch (err) {
         setError('Ошибка чтения: ' + err.message)
+        console.error(err)
       } finally {
         setIsLoading(false)
       }
@@ -347,16 +221,17 @@ export default function App() {
       setError("Нет токена доступа")
       return
     }
+    if (!excelData || !excelData.sheets || excelData.sheets.length === 0) {
+      setError("Нет данных для создания таблицы")
+      return
+    }
     
     setIsCreating(true)
     setError(null)
     
-    const title = fileName.replace('.xlsx', '') + ' - Обработано'
+    const title = fileName.replace('.xlsx', '') + ' - ' + new Date().toLocaleDateString('ru-RU')
     
     try {
-      // Используем processedData (уже обработанную макросом)
-      const targetSheets = processedData || excelData.sheets
-      
       // 1. Создаем таблицу
       const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
         method: 'POST',
@@ -373,7 +248,7 @@ export default function App() {
       const spreadsheetId = createData.spreadsheetId
       let firstSheetId = createData.sheets[0].properties.sheetId
 
-      // 2. Перемещаем в папку
+      // 2. Перемещаем в папку (если выбрана)
       if (selectedFolder) {
         const moveRes = await fetch(
           `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
@@ -391,15 +266,16 @@ export default function App() {
         }
       }
 
-      // 3. Подготовка листов и данных
-      const requests = []
-      const sheetIds = []
+      // 3. Подготовка запросов для создания/переименования листов
+      const initRequests = []
+      const sheetIds = new Array(excelData.sheets.length).fill(null)
 
-      targetSheets.forEach((sheet, index) => {
+      excelData.sheets.forEach((sheet, index) => {
         if (index === 0) {
-          sheetIds.push(firstSheetId)
+          sheetIds[index] = firstSheetId
+          // Переименовываем первый лист, если имя отличается
           if (sheet.name !== createData.sheets[0].properties.title) {
-            requests.push({
+            initRequests.push({
               updateSheetProperties: {
                 properties: { sheetId: firstSheetId, title: sheet.name.substring(0, 100) },
                 fields: 'title'
@@ -407,16 +283,19 @@ export default function App() {
             })
           }
         } else {
-          requests.push({
+          // Добавляем новые листы
+          initRequests.push({
             addSheet: {
-              properties: { title: sheet.name.substring(0, 100) }
+              properties: {
+                title: sheet.name.substring(0, 100)
+              }
             }
           })
         }
       })
 
-      // Создаем листы
-      if (requests.length > 0) {
+      // Этап А: Создаем листы и переименовываем
+      if (initRequests.length > 0) {
         const initRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
           {
@@ -425,7 +304,7 @@ export default function App() {
               'Authorization': `Bearer ${accessToken}`,
               'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ requests })
+            body: JSON.stringify({ requests: initRequests })
           }
         )
         
@@ -435,58 +314,77 @@ export default function App() {
         }
 
         const initData = await initRes.json()
-        let replyIndex = 0
-        targetSheets.forEach((sheet, index) => {
+        // Получаем ID созданных листов
+        let replyIdx = 0
+        excelData.sheets.forEach((sheet, index) => {
           if (index === 0) {
-             sheetIds[index] = firstSheetId
+            sheetIds[index] = firstSheetId
           } else {
-             const reply = initData.replies[replyIndex]
-             if (reply && reply.addSheet && reply.addSheet.properties) {
-               sheetIds[index] = reply.addSheet.properties.sheetId
-             }
-             replyIndex++
+            const reply = initData.replies[replyIdx]
+            if (reply && reply.addSheet && reply.addSheet.properties) {
+              sheetIds[index] = reply.addSheet.properties.sheetId
+            }
+            replyIdx++
           }
         })
       }
 
-      // Заполняем данные
+      // Этап Б: Заполнение данными
       const fillRequests = []
       
-      targetSheets.forEach((sheet, index) => {
+      excelData.sheets.forEach((sheet, index) => {
         const currentSheetId = sheetIds[index]
         const rowData = sheet.data
         
-        if (rowData && rowData.length > 0) {
-          const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
-          
-          fillRequests.push({
-            updateCells: {
-              range: {
-                sheetId: currentSheetId,
-                startRowIndex: 0,
-                endRowIndex: rowData.length,
-                startColumnIndex: 0,
-                endColumnIndex: maxCols
-              },
-              rows: rowData.map(row => {
-                if (!row) return { values: [] }
-                return {
-                  values: row.map(cell => {
-                    if (cell === null || cell === undefined || cell === '') return {}
-                    if (typeof cell === 'number') return { userEnteredValue: { numberValue: cell } }
-                    if (typeof cell === 'boolean') return { userEnteredValue: { boolValue: cell } }
-                    if (cell instanceof Date) return { userEnteredValue: { stringValue: cell.toISOString().split('T')[0] } }
-                    return { userEnteredValue: { stringValue: String(cell) } }
-                  })
-                }
-              }),
-              fields: 'userEnteredValue'
-            }
-          })
-        }
+        if (!rowData || rowData.length === 0) return
+
+        const maxCols = rowData[0].length // Мы уже выровняли матрицу
+        
+        // Формируем строки для API
+        const apiRows = rowData.map(row => {
+          return {
+            values: row.map(cell => {
+              // Определяем тип значения для Google API
+              if (cell === "" || cell === null || cell === undefined) {
+                return {} // Пустая ячейка
+              }
+              
+              const numVal = Number(cell)
+              // Если это число и строка не слишком длинная (не текст случайно), считаем числом
+              // Но надежнее отправлять как строку, если мы использовали raw: false при чтении
+              // Однако для чисел лучше numberValue
+              if (!isNaN(numVal) && cell.trim() !== "" && String(numVal).length === cell.trim().length) {
+                 return { userEnteredValue: { numberValue: numVal } }
+              }
+              
+              if (cell.toLowerCase() === 'true') return { userEnteredValue: { boolValue: true } }
+              if (cell.toLowerCase() === 'false') return { userEnteredValue: { boolValue: false } }
+              
+              // По умолчанию строка
+              return { userEnteredValue: { stringValue: cell } }
+            })
+          }
+        })
+
+        fillRequests.push({
+          updateCells: {
+            range: {
+              sheetId: currentSheetId,
+              startRowIndex: 0,
+              endRowIndex: rowData.length,
+              startColumnIndex: 0,
+              endColumnIndex: maxCols
+            },
+            rows: apiRows,
+            fields: 'userEnteredValue'
+          }
+        })
       })
 
       if (fillRequests.length > 0) {
+        // Разбиваем на пакеты, если данных очень много (лимит 100 запросов на batchUpdate, но у нас 1 запрос на лист)
+        // Если листов много, можно группировать, но обычно листов немного.
+        
         const updateRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
           {
@@ -499,9 +397,9 @@ export default function App() {
           }
         )
         
-        const updateData = await updateRes.json()
-        if (updateData.error) {
-          console.warn("Warning during data update:", updateData.error)
+        if (!updateRes.ok) {
+          const updateErr = await updateRes.json()
+          throw new Error("Ошибка записи данных: " + (updateErr.error?.message || 'Unknown'))
         }
       }
 
@@ -519,27 +417,23 @@ export default function App() {
     }
   }
 
-  const downloadProcessedExcel = () => {
-    if (!processedData) return;
+  const downloadExcel = () => {
+    if (!excelData || !excelData.sheets) return
     
-    // Создаем новую книгу
-    const wb = XLSX.utils.book_new();
+    const wb = XLSX.utils.book_new()
     
-    // Добавляем обработанные листы
-    processedData.forEach(sheet => {
-      const ws = XLSX.utils.aoa_to_sheet(sheet.data);
-      XLSX.utils.book_append_sheet(wb, ws, sheet.name);
-    });
+    excelData.sheets.forEach(sheet => {
+      // Создаем новый лист из наших очищенных данных
+      const ws = XLSX.utils.aoa_to_sheet(sheet.data)
+      XLSX.utils.book_append_sheet(wb, ws, sheet.name)
+    })
     
-    // Скачиваем файл
-    const newName = fileName.replace('.xlsx', '_Обработано.xlsx');
-    XLSX.writeFile(wb, newName);
-  };
+    XLSX.writeFile(wb, fileName.replace('.xlsx', '_processed.xlsx'))
+  }
 
   const resetApp = () => {
     setStep(1)
     setExcelData(null)
-    setProcessedData(null)
     setFileName("")
     setFolders([])
     setSelectedFolder(null)
@@ -551,8 +445,8 @@ export default function App() {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-8 px-4">
       <div className="max-w-2xl mx-auto">
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-gray-800 mb-2">Excel ВОР → Обработка</h1>
-          <p className="text-gray-600">Конвертация с логикой макроса и выгрузка в Google/Excel</p>
+          <h1 className="text-3xl font-bold text-gray-800 mb-2">Excel → Google Sheets</h1>
+          <p className="text-gray-600">Конвертируйте Excel файлы в Google Таблицы</p>
         </div>
         
         {/* Progress */}
@@ -568,7 +462,7 @@ export default function App() {
             <div className="h-full bg-blue-600 rounded-full transition-all duration-300" style={{ width: `${((step - 1) / 3) * 100}%` }} />
           </div>
           <div className="flex justify-between mt-2 text-xs text-gray-500">
-            <span>Файл</span><span>Обработка</span><span>Папка</span><span>Готово</span>
+            <span>Файл</span><span>Проверка</span><span>Папка</span><span>Готово</span>
           </div>
         </div>
 
@@ -581,7 +475,7 @@ export default function App() {
 
           {step === 1 && (
             <div>
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Загрузите файл ВОР</h2>
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">Загрузите Excel файл</h2>
               <div 
                 onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }} 
                 onDragLeave={() => setIsDragging(false)} 
@@ -592,7 +486,7 @@ export default function App() {
                 <label htmlFor="fileInput" className="cursor-pointer block">
                   <div className="flex flex-col items-center">
                     <div className="mb-4 text-gray-400"><UploadIcon /></div>
-                    <p className="text-lg font-medium text-gray-700 mb-2">Перетащите файл ВОР сюда</p>
+                    <p className="text-lg font-medium text-gray-700 mb-2">Перетащите файл сюда</p>
                     <p className="text-sm text-gray-500 mb-4">или нажмите для выбора</p>
                     <p className="text-xs text-gray-400">Только .xlsx</p>
                   </div>
@@ -602,33 +496,18 @@ export default function App() {
             </div>
           )}
 
-          {step === 2 && processedData && (
+          {step === 2 && excelData && (
             <div>
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Файл обработан</h2>
-              <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
-                <div className="flex items-start mb-3">
-                  <CheckIcon className="mr-3 text-green-600 mt-1" />
-                  <div>
-                    <p className="font-medium text-green-800">Применена логика макроса:</p>
-                    <ul className="text-sm text-green-700 list-disc ml-5 mt-1 space-y-1">
-                      <li>Заголовки переименованы по словарю</li>
-                      <li>Колонка V скопирована в AF</li>
-                      <li>Пустые ячейки (A-N) заполнены снизу-вверх</li>
-                      <li>Даты отформатированы (ДД.ММ.ГГГГ)</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-              
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">Файл готов</h2>
               <div className="bg-gray-50 rounded-lg p-4 mb-6">
                 <div className="flex items-center mb-3">
                   <FileIcon className="mr-3 text-blue-600" />
                   <span className="font-medium text-gray-800 truncate">{fileName}</span>
                 </div>
                 <div className="text-sm text-gray-600">
-                  <p className="mb-2">Листов: <strong>{processedData.length}</strong></p>
+                  <p className="mb-2">Листов: <strong>{excelData.sheets.length}</strong></p>
                   <div className="flex flex-wrap gap-2">
-                    {processedData.map((s, i) => (
+                    {excelData.sheets.map((s, i) => (
                       <span key={i} className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs flex items-center">
                         <SheetIcon className="mr-1 w-3 h-3"/> {s.name}
                       </span>
@@ -636,10 +515,9 @@ export default function App() {
                   </div>
                 </div>
               </div>
-
               {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
               <button onClick={authenticate} disabled={!gapiReady || !gisReady} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                <GoogleIcon className="mr-2" /> Войти и выбрать папку Google
+                <GoogleIcon className="mr-2" /> Войти через Google
               </button>
             </div>
           )}
@@ -680,8 +558,8 @@ export default function App() {
               )}
               
               {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
-              <button onClick={createGoogleSheet} disabled={isCreating} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
-                {isCreating ? <><RefreshIcon className="animate-spin mr-2" /> Создание...</> : <><SheetIcon className="mr-2" /> Создать Google Таблицу</>}
+              <button onClick={createGoogleSheet} disabled={isCreating || !excelData} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
+                {isCreating ? <><RefreshIcon className="animate-spin mr-2" /> Создание...</> : <><SheetIcon className="mr-2" /> Создать таблицу</>}
               </button>
             </div>
           )}
@@ -694,19 +572,19 @@ export default function App() {
               <h2 className="text-xl font-semibold text-gray-800 mb-2">Готово!</h2>
               <p className="text-gray-600 mb-6">{result.title}</p>
               
-              <div className="flex flex-col gap-3 mb-6">
+              <div className="flex flex-col sm:flex-row gap-4 justify-center mb-4">
                 <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md">
-                  <GoogleIcon className="mr-2" /> Открыть в Google Таблицах <ArrowRightIcon className="ml-2 w-4 h-4"/>
+                  <GoogleIcon className="mr-2" /> Открыть в Google <ArrowRightIcon className="ml-2 w-4 h-4"/>
                 </a>
                 
-                <button onClick={downloadProcessedExcel} className="inline-flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md">
-                  <DownloadIcon className="mr-2" /> Скачать результат в Excel
+                <button onClick={downloadExcel} className="inline-flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md">
+                  <DownloadIcon className="mr-2" /> Скачать Excel
                 </button>
               </div>
 
               <div className="pt-4 border-t">
                 <button onClick={resetApp} className="text-gray-600 hover:text-gray-800 text-sm font-medium flex items-center mx-auto">
-                  <RefreshIcon className="mr-2" /> Обработать другой файл
+                  <RefreshIcon className="mr-2" /> Конвертировать другой файл
                 </button>
               </div>
             </div>
@@ -714,7 +592,7 @@ export default function App() {
         </div>
         
         <div className="mt-6 text-center text-xs text-gray-500 flex items-center justify-center">
-          <LockIcon className="inline-block mr-1 w-3 h-3" /> Данные обрабатываются локально в браузере
+          <LockIcon className="inline-block mr-1 w-3 h-3" /> Данные обрабатываются локально и передаются только в Google
         </div>
       </div>
     </div>
