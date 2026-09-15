@@ -73,7 +73,6 @@ export default function App() {
         setError("Ошибка загрузки сервисов Google.")
       }
     }
-
     loadScripts()
   }, [])
 
@@ -90,12 +89,12 @@ export default function App() {
     reader.onload = (e) => {
       try {
         const data = new Uint8Array(e.target.result)
-        const workbook = XLSX.read(data, { type: 'array' })
+        const workbook = XLSX.read(data, { type: 'array', cellDates: true })
         
-        // ИСПРАВЛЕНО: Добавлен ключ 'data'
+        // Исправлено: добавлен ключ 'data'
         const sheets = workbook.SheetNames.map(name => ({
           name,
-          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
+           XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
         }))
         
         setExcelData({ workbook, sheets })
@@ -120,7 +119,6 @@ export default function App() {
       setError("Сервисы Google еще не загружены.")
       return
     }
-
     const tokenClient = window.google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
       scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
@@ -133,12 +131,10 @@ export default function App() {
         if (window.gapi && window.gapi.client) {
           window.gapi.client.setToken({ access_token: response.access_token })
         }
-        
         loadFolders()
         setStep(3)
       },
     })
-
     tokenClient.requestAccessToken()
   }
 
@@ -150,19 +146,12 @@ export default function App() {
     try {
       const res = await fetch(
         `https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'+and+trashed=false&fields=files(id,name,parents)&spaces=drive`,
-        {
-          headers: { 
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        { headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
       )
-      
       if (!res.ok) {
         const errData = await res.json()
         throw new Error(errData.error?.message || `HTTP ${res.status}`)
       }
-
       const data = await res.json()
       const files = data.files || []
       const rootFolders = files.filter(f => !f.parents || f.parents.length === 0 || f.parents[0] === 'root')
@@ -189,10 +178,7 @@ export default function App() {
       // 1. Создаем таблицу
       const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ properties: { title } })
       })
       
@@ -204,88 +190,64 @@ export default function App() {
 
       // 2. Перемещаем в папку
       if (selectedFolder) {
-        const moveRes = await fetch(
+        await fetch(
           `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
-          {
-            method: 'PATCH',
-            headers: { 
-              'Authorization': `Bearer ${accessToken}`,
-              'Content-Type': 'application/json'
-            }
-          }
+          { method: 'PATCH', headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
         )
-        if (!moveRes.ok) {
-          const moveErr = await moveRes.json()
-          console.warn("Move warning:", moveErr)
-        }
       }
 
-      // 3. Подготовка запросов
+      // 3. Подготовка запросов для листов
       const requests = []
-      const sheetIds = [] 
+      const sheetIds = []
 
       excelData.sheets.forEach((sheet, index) => {
-        let currentSheetId
-        
         if (index === 0) {
-          currentSheetId = firstSheetId
+          sheetIds.push(firstSheetId)
           if (sheet.name !== createData.sheets[0].properties.title) {
             requests.push({
               updateSheetProperties: {
-                properties: { sheetId: currentSheetId, title: sheet.name.substring(0, 100) },
+                properties: { sheetId: firstSheetId, title: sheet.name.substring(0, 100) },
                 fields: 'title'
               }
             })
           }
         } else {
           requests.push({
-            addSheet: {
-              properties: { title: sheet.name.substring(0, 100) }
-            }
+            addSheet: { properties: { title: sheet.name.substring(0, 100) } }
           })
         }
-        sheetIds.push(currentSheetId)
       })
 
-      // Этап А: Создаем листы
+      // Этап А: Создаем/переименовываем листы
       if (requests.length > 0) {
         const initRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
           {
             method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-              'Content-Type': 'application/json'
-            },
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ requests })
           }
         )
+        if (!initRes.ok) throw new Error("Ошибка инициализации листов")
         
-        if (!initRes.ok) {
-           const initErr = await initRes.json()
-           throw new Error("Ошибка инициализации листов: " + (initErr.error?.message || 'Unknown'))
-        }
-
         const initData = await initRes.json()
-        const createdReplies = initData.replies
         let replyIndex = 0
-        
         excelData.sheets.forEach((sheet, index) => {
           if (index === 0) {
-             sheetIds[index] = firstSheetId
+            sheetIds[index] = firstSheetId
           } else {
-             const reply = createdReplies[replyIndex]
-             if (reply && reply.addSheet && reply.addSheet.properties) {
-               sheetIds[index] = reply.addSheet.properties.sheetId
-             }
-             replyIndex++
+            const reply = initData.replies[replyIndex]
+            if (reply && reply.addSheet && reply.addSheet.properties) {
+              sheetIds[index] = reply.addSheet.properties.sheetId
+            }
+            replyIndex++
           }
         })
       } else {
         sheetIds[0] = firstSheetId
       }
 
-      // Этап Б: Заполняем данные
+      // Этап Б: Заполняем данными (ИСПРАВЛЕНО)
       const fillRequests = []
       
       excelData.sheets.forEach((sheet, index) => {
@@ -293,8 +255,36 @@ export default function App() {
         const rowData = sheet.data
         
         if (rowData && rowData.length > 0) {
+          // Находим макс ширину
           const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
           
+          const rowsPayload = rowData.map(row => {
+            if (!row) return { values: [] }
+            return {
+              values: row.map(cell => {
+                // Надежная конвертация типов
+                if (cell === null || cell === undefined || cell === "") {
+                  return {}
+                }
+                if (typeof cell === 'number') {
+                  return { userEnteredValue: { numberValue: cell } }
+                }
+                if (typeof cell === 'boolean') {
+                  return { userEnteredValue: { boolValue: cell } }
+                }
+                if (cell instanceof Date) {
+                   // Дата в формате YYYY-MM-DD
+                   const yyyy = cell.getFullYear()
+                   const mm = String(cell.getMonth() + 1).padStart(2, '0')
+                   const dd = String(cell.getDate()).padStart(2, '0')
+                   return { userEnteredValue: { stringValue: `${yyyy}-${mm}-${dd}` } }
+                }
+                // Строка по умолчанию
+                return { userEnteredValue: { stringValue: String(cell) } }
+              })
+            }
+          })
+
           fillRequests.push({
             updateCells: {
               range: {
@@ -304,26 +294,7 @@ export default function App() {
                 startColumnIndex: 0,
                 endColumnIndex: maxCols
               },
-              rows: rowData.map(row => {
-                if (!row) return { values: [] }
-                return {
-                  values: row.map(cell => {
-                    if (cell === null || cell === undefined || cell === '') {
-                      return {}
-                    }
-                    if (typeof cell === 'number') {
-                      return { userEnteredValue: { numberValue: cell } }
-                    }
-                    if (typeof cell === 'boolean') {
-                      return { userEnteredValue: { boolValue: cell } }
-                    }
-                    if (cell instanceof Date) {
-                       return { userEnteredValue: { stringValue: cell.toISOString().split('T')[0] } }
-                    }
-                    return { userEnteredValue: { stringValue: String(cell) } }
-                  })
-                }
-              }),
+              rows: rowsPayload,
               fields: 'userEnteredValue'
             }
           })
@@ -335,17 +306,13 @@ export default function App() {
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
           {
             method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-              'Content-Type': 'application/json'
-            },
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ requests: fillRequests })
           }
         )
-        
-        const updateData = await updateRes.json()
-        if (updateData.error) {
-          console.warn("Warning during data update:", updateData.error)
+        if (!updateRes.ok) {
+           const err = await updateRes.json()
+           console.warn("Warning during data update:", err)
         }
       }
 
@@ -365,14 +332,12 @@ export default function App() {
 
   const downloadExcel = () => {
     if (!excelData) return
-    
     const wb = XLSX.utils.book_new()
-    
     excelData.sheets.forEach(sheet => {
+      // Преобразуем массив массивов обратно в лист
       const ws = XLSX.utils.aoa_to_sheet(sheet.data)
       XLSX.utils.book_append_sheet(wb, ws, sheet.name)
     })
-    
     XLSX.writeFile(wb, fileName.replace('.xlsx', '_processed.xlsx'))
   }
 
@@ -394,7 +359,6 @@ export default function App() {
           <p className="text-gray-600">Конвертируйте Excel файлы в Google Таблицы</p>
         </div>
         
-        {/* Progress */}
         <div className="mb-8">
           <div className="flex justify-between mb-2">
             {[1, 2, 3, 4].map((s) => (
@@ -430,7 +394,8 @@ export default function App() {
                 <input type="file" accept=".xlsx" onChange={(e) => handleFile(e.target.files[0])} className="hidden" id="fileInput" />
                 <label htmlFor="fileInput" className="cursor-pointer block">
                   <div className="flex flex-col items-center">
-                    <div className="mb-4 text-gray-400"><UploadIcon /></div>
+                    {/* Логотип */}
+                    <img src="/logo.png" alt="Logo" className="w-24 h-24 mb-4 object-contain" />
                     <p className="text-lg font-medium text-gray-700 mb-2">Перетащите файл сюда</p>
                     <p className="text-sm text-gray-500 mb-4">или нажмите для выбора</p>
                     <p className="text-xs text-gray-400">Только .xlsx</p>
@@ -517,23 +482,14 @@ export default function App() {
               <h2 className="text-xl font-semibold text-gray-800 mb-2">Готово!</h2>
               <p className="text-gray-600 mb-6">{result.title}</p>
               
-              <div className="flex flex-col sm:flex-row gap-4 justify-center mb-4">
-                <a 
-                  href={result.url} 
-                  target="_blank" 
-                  rel="noreferrer" 
-                  className="inline-flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md flex-1"
-                >
-                  <img src="/logoGS.png" alt="GS" className="w-5 h-5 mr-2 object-contain" />
-                  Открыть Google Таблицу
-                  <ArrowRightIcon className="ml-2 w-4 h-4"/>
+              <div className="flex flex-col sm:flex-row gap-4 justify-center mb-6">
+                <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md flex-1">
+                  <img src="/logoGS.png" alt="GS" className="w-5 h-5 mr-2 bg-white rounded" />
+                  Открыть Google Таблицу <ArrowRightIcon className="ml-2 w-4 h-4"/>
                 </a>
                 
-                <button 
-                  onClick={downloadExcel}
-                  className="inline-flex items-center justify-center bg-green-600 hover:bg-green-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md flex-1"
-                >
-                  <img src="/logoXLSX.png" alt="XLSX" className="w-5 h-5 mr-2 object-contain" />
+                <button onClick={downloadExcel} className="inline-flex items-center justify-center bg-green-600 hover:bg-green-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md flex-1">
+                  <img src="/logoXLSX.png" alt="XLSX" className="w-5 h-5 mr-2 bg-white rounded" />
                   Скачать Excel
                 </button>
               </div>
