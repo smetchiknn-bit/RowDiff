@@ -80,6 +80,17 @@ export default function App() {
     loadScripts()
   }, [])
 
+  // Функция очистки имени листа от недопустимых символов
+  const sanitizeSheetName = (name) => {
+    // Google Sheets не допускает : \ / ? * [ ] в именах листов
+    // Также длина не более 31 символа
+    let cleanName = name.replace(/[:\\/?*\[\]]/g, '-')
+    if (cleanName.length > 31) {
+      cleanName = cleanName.substring(0, 31)
+    }
+    return cleanName.trim() || 'Sheet'
+  }
+
   const handleFile = (file) => {
     if (!file || !file.name.endsWith('.xlsx')) {
       setError('Пожалуйста, загрузите файл .xlsx')
@@ -95,11 +106,34 @@ export default function App() {
         const data = new Uint8Array(e.target.result)
         const workbook = XLSX.read(data, { type: 'array' })
         
-        // Исправлено: добавлен ключ 'data'
-        const sheets = workbook.SheetNames.map(name => ({
-          name,
-          data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
-        }))
+        const sheets = workbook.SheetNames.map(name => {
+          const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
+          
+          // ФИЛЬТРАЦИЯ: Убираем колонку timestamp_create (индекс 0), если она есть
+          // Проверяем первую строку (заголовок)
+          if (rawData.length > 0 && rawData[0].length > 0) {
+             const firstCell = String(rawData[0][0]).toLowerCase().trim()
+             if (firstCell === 'timestamp_create') {
+                // Удаляем первый элемент из каждой строки
+                const filteredData = rawData.map(row => {
+                  const newRow = [...row]
+                  newRow.shift() // Удаляем элемент по индексу 0
+                  return newRow
+                })
+                return {
+                  name: sanitizeSheetName(name),
+                  originalName: name,
+                  data: filteredData
+                }
+             }
+          }
+          
+          return {
+            name: sanitizeSheetName(name),
+            originalName: name,
+            data: rawData
+          }
+        })
         
         setExcelData({ workbook, sheets })
         setStep(2)
@@ -207,7 +241,7 @@ export default function App() {
       // 2. Перемещаем в папку (если выбрана)
       if (selectedFolder) {
         const moveRes = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&removeParents=root&fields=id,parents`,
+          `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${selectedFolder.id}&fields=id,parents`,
           {
             method: 'PATCH',
             headers: { 
@@ -222,38 +256,94 @@ export default function App() {
         }
       }
 
-      // 3. Подготовка данных для отправки (ФИЛЬТРАЦИЯ КОЛОНКИ A)
-      const valuesPayload = []
+      // 3. Подготовка данных для отправки
+      // Нам нужно переименовать первый лист и добавить остальные, затем заполнить все
+      const requests = []
+      const sheetIdsMap = {} // Map sanitized name -> sheetId
       
-      excelData.sheets.forEach((sheet, index) => {
-        let rowData = sheet.data || []
-        
-        if (rowData.length === 0) return
+      // Получаем ID первого листа (он создается автоматически)
+      const firstSheetId = createData.sheets[0].properties.sheetId
+      const firstSheetTempName = createData.sheets[0].properties.title
+      
+      // Если у нас есть данные, переименуем первый лист в имя первого листа из Excel
+      if (excelData.sheets.length > 0) {
+        const firstSheetName = excelData.sheets[0].name
+        if (firstSheetName !== firstSheetTempName) {
+           requests.push({
+             updateSheetProperties: {
+               properties: { sheetId: firstSheetId, title: firstSheetName },
+               fields: 'title'
+             }
+           })
+        }
+        sheetIdsMap[firstSheetName] = firstSheetId
+      }
 
-        // ФИЛЬТР: Если первая ячейка первой строки содержит "timestamp", удаляем первую колонку
-        const firstCell = rowData[0][0]
-        const shouldRemoveFirstCol = typeof firstCell === 'string' && firstCell.toLowerCase().includes('timestamp')
-
-        const processedRows = rowData.map(row => {
-          if (!row) return []
-          // Если нужно удалить первую колонку, берем срез массива с 1 элемента
-          if (shouldRemoveFirstCol) {
-            return row.slice(1)
+      // Добавляем остальные листы
+      for (let i = 1; i < excelData.sheets.length; i++) {
+        const sheet = excelData.sheets[i]
+        requests.push({
+          addSheet: {
+            properties: { title: sheet.name }
           }
-          return row
         })
+      }
 
-        // Формируем диапазон (например, "Лист1!A1")
-        const range = `${sheet.name}!A1`
+      // Выполняем запрос на создание/переименование листов
+      if (requests.length > 0) {
+        const batchRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ requests })
+          }
+        )
         
-        valuesPayload.push({
-          range: range,
-          values: processedRows
-        })
+        if (!batchRes.ok) {
+           const batchErr = await batchRes.json()
+           throw new Error("Ошибка создания листов: " + (batchErr.error?.message || 'Unknown'))
+        }
+
+        const batchData = await batchRes.json()
+        const replies = batchData.replies || []
+        
+        // Сопоставляем ID созданных листов с их именами
+        let replyIndex = 0
+        for (let i = 1; i < excelData.sheets.length; i++) {
+          const reply = replies[replyIndex]
+          if (reply && reply.addSheet && reply.addSheet.properties) {
+            sheetIdsMap[excelData.sheets[i].name] = reply.addSheet.properties.sheetId
+          }
+          replyIndex++
+        }
+      }
+
+      // 4. Заполнение данных (Batch Update Values)
+      // Это более надежный способ, чем updateCells
+      const valueRequests = []
+      
+      excelData.sheets.forEach(sheet => {
+        const sheetId = sheetIdsMap[sheet.name]
+        const rowData = sheet.data
+        
+        if (rowData && rowData.length > 0) {
+          // Очищаем пустые строки в конце, если они есть
+          const cleanData = rowData.filter(row => row.some(cell => cell !== "" && cell !== null && cell !== undefined))
+          
+          if (cleanData.length > 0) {
+            valueRequests.push({
+              range: `'${sheet.name}'!A1`,
+              values: cleanData
+            })
+          }
+        }
       })
 
-      // 4. Отправка данных одним надежным запросом values:batchUpdate
-      if (valuesPayload.length > 0) {
+      if (valueRequests.length > 0) {
         const updateRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
           {
@@ -263,16 +353,15 @@ export default function App() {
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-              valueInputOption: 'USER_ENTERED', // Позволяет Google самим определить формат (число, дата, текст)
-              data: valuesPayload
+              valueInputOption: 'USER_ENTERED',
+              data: valueRequests
             })
           }
         )
         
         const updateData = await updateRes.json()
         if (updateData.error) {
-          console.error("Batch Update Error:", updateData.error)
-          throw new Error("Ошибка записи данных: " + updateData.error.message)
+          throw new Error("Ошибка записи данных: " + (updateData.error.message || 'Unknown'))
         }
       }
 
@@ -297,7 +386,7 @@ export default function App() {
     
     excelData.sheets.forEach(sheet => {
       const ws = XLSX.utils.aoa_to_sheet(sheet.data);
-      XLSX.utils.book_append_sheet(wb, ws, sheet.name);
+      XLSX.utils.book_append_sheet(wb, ws, sheet.originalName || sheet.name);
     });
     
     XLSX.writeFile(wb, fileName.replace('.xlsx', '_processed.xlsx'));
@@ -383,10 +472,11 @@ export default function App() {
                   <div className="flex flex-wrap gap-2">
                     {excelData.sheets.map((s, i) => (
                       <span key={i} className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs flex items-center">
-                        <SheetIcon className="mr-1 w-3 h-3"/> {s.name}
+                        <SheetIcon className="mr-1 w-3 h-3"/> {s.originalName} {s.originalName !== s.name ? `→ ${s.name}` : ''}
                       </span>
                     ))}
                   </div>
+                  <p className="mt-2 text-xs text-green-600">✓ Колонка "timestamp_create" будет исключена при загрузке</p>
                 </div>
               </div>
               {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
