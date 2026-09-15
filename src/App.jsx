@@ -34,6 +34,7 @@ export default function App() {
   useEffect(() => {
     const loadScripts = async () => {
       try {
+        // 1. Загрузка GAPI
         if (!window.gapi) {
           await new Promise((resolve, reject) => {
             const script = document.createElement('script')
@@ -44,6 +45,7 @@ export default function App() {
           })
         }
 
+        // 2. Инициализация GAPI клиента
         await new Promise((resolve) => {
           window.gapi.load('client', () => {
             window.gapi.client.init({
@@ -58,6 +60,7 @@ export default function App() {
         })
         setGapiReady(true)
 
+        // 3. Загрузка GIS
         if (!window.google || !window.google.accounts) {
           await new Promise((resolve, reject) => {
             const script = document.createElement('script')
@@ -73,6 +76,7 @@ export default function App() {
         setError("Ошибка загрузки сервисов Google.")
       }
     }
+
     loadScripts()
   }, [])
 
@@ -132,6 +136,7 @@ export default function App() {
         if (window.gapi && window.gapi.client) {
           window.gapi.client.setToken({ access_token: response.access_token })
         }
+        
         loadFolders()
         setStep(3)
       },
@@ -368,10 +373,10 @@ export default function App() {
     
     excelData.sheets.forEach(sheet => {
       const ws = XLSX.utils.aoa_to_sheet(sheet.data)
-      XLSX.utils.book_append_sheet(wb, ws, sheet.name)
+      XLSX.utils.book_append_sheet(wb, ws, sheet.name.substring(0, 31))
     })
     
-    XLSX.writeFile(wb, fileName.replace('.xlsx', '_processed.xlsx'))
+    XLSX.writeFile(wb, fileName.replace('.xlsx', '') + '_processed.xlsx')
   }
 
   const resetApp = () => {
@@ -515,7 +520,7 @@ export default function App() {
               <h2 className="text-xl font-semibold text-gray-800 mb-2">Готово!</h2>
               <p className="text-gray-600 mb-6">{result.title}</p>
               
-              <div className="flex flex-col sm:flex-row gap-4 justify-center mb-6">
+              <div className="flex flex-col sm:flex-row gap-4 justify-center mb-4">
                 <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center bg-green-600 hover:bg-green-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md">
                   <img src="/logoGS.png" alt="GS" className="w-5 h-5 mr-2" />
                   Открыть Google Таблицу
