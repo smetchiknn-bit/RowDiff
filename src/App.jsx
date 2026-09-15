@@ -18,7 +18,7 @@ const DownloadIcon = () => <svg width="20" height="20" viewBox="0 0 24 24" fill=
 
 export default function App() {
   const [step, setStep] = useState(1)
-  const [excelData, setExcelData] = useState(null) // Здесь храним очищенные данные
+  const [excelData, setExcelData] = useState(null)
   const [fileName, setFileName] = useState("")
   const [isDragging, setIsDragging] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -91,59 +91,17 @@ export default function App() {
     reader.onload = (e) => {
       try {
         const data = new Uint8Array(e.target.result)
-        // Читаем с опциями: даты как даты, пустые ячейки как пустые строки
-        const workbook = XLSX.read(data, { 
-          type: 'array',
-          cellDates: true, 
-          defval: "" 
-        })
+        const workbook = XLSX.read(data, { type: 'array' })
         
-        // Обрабатываем каждый лист
-        const sheets = workbook.SheetNames.map(name => {
-          const worksheet = workbook.Sheets[name]
-          // Конвертируем в массив массивов (header: 1)
-          const rawData = XLSX.utils.sheet_to_json(worksheet, { 
-            header: 1, 
-            defval: "", 
-            raw: false // Получаем отформатированные значения (строки), а не сырые коды
-          })
-
-          // Глубокая очистка данных для Google API
-          const cleanedData = rawData.map(row => {
-            if (!row) return []
-            return row.map(cell => {
-              if (cell === null || cell === undefined) return ""
-              if (cell instanceof Date) {
-                // Форматируем дату в YYYY-MM-DD для Google Sheets
-                const year = cell.getFullYear()
-                const month = String(cell.getMonth() + 1).padStart(2, '0')
-                const day = String(cell.getDate()).padStart(2, '0')
-                return `${year}-${month}-${day}`
-              }
-              return String(cell)
-            })
-          })
-
-          // Выравниваем длину строк (чтобы матрица была прямоугольной)
-          const maxLen = Math.max(...cleanedData.map(r => r.length), 0)
-          const normalizedData = cleanedData.map(row => {
-            if (row.length < maxLen) {
-              return [...row, ...Array(maxLen - row.length).fill("")]
-            }
-            return row
-          })
-
-          return {
-            name,
-             normalizedData
-          }
-        })
+        const sheets = workbook.SheetNames.map(name => ({
+          name,
+           XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: "" })
+        }))
         
-        setExcelData({ sheets: sheets })
+        setExcelData({ workbook, sheets })
         setStep(2)
       } catch (err) {
         setError('Ошибка чтения: ' + err.message)
-        console.error(err)
       } finally {
         setIsLoading(false)
       }
@@ -216,13 +174,38 @@ export default function App() {
     }
   }
 
+  // Функция скачивания Excel
+  const downloadExcel = () => {
+    if (!excelData || !excelData.sheets) return
+    
+    try {
+      const wb = XLSX.utils.book_new()
+      
+      excelData.sheets.forEach(sheet => {
+        // Очищаем данные от null/undefined перед записью
+        const cleanData = sheet.data.map(row => 
+          row.map(cell => {
+            if (cell === null || cell === undefined) return ""
+            if (cell instanceof Date) return cell.toISOString().split('T')[0]
+            return cell
+          })
+        )
+        
+        const ws = XLSX.utils.aoa_to_sheet(cleanData)
+        XLSX.utils.book_append_sheet(wb, ws, sheet.name.substring(0, 31))
+      })
+      
+      const newName = fileName.replace('.xlsx', '') + '_processed.xlsx'
+      XLSX.writeFile(wb, newName)
+    } catch (err) {
+      console.error("Download error:", err)
+      setError("Ошибка при скачивании файла: " + err.message)
+    }
+  }
+
   const createGoogleSheet = async () => {
     if (!accessToken) {
       setError("Нет токена доступа")
-      return
-    }
-    if (!excelData || !excelData.sheets || excelData.sheets.length === 0) {
-      setError("Нет данных для создания таблицы")
       return
     }
     
@@ -266,36 +249,35 @@ export default function App() {
         }
       }
 
-      // 3. Подготовка запросов для создания/переименования листов
-      const initRequests = []
-      const sheetIds = new Array(excelData.sheets.length).fill(null)
+      // 3. Подготовка запросов для заполнения данными
+      const requests = []
+      const sheetIds = [] 
 
       excelData.sheets.forEach((sheet, index) => {
+        let currentSheetId
+        
         if (index === 0) {
-          sheetIds[index] = firstSheetId
-          // Переименовываем первый лист, если имя отличается
+          currentSheetId = firstSheetId
           if (sheet.name !== createData.sheets[0].properties.title) {
-            initRequests.push({
+            requests.push({
               updateSheetProperties: {
-                properties: { sheetId: firstSheetId, title: sheet.name.substring(0, 100) },
+                properties: { sheetId: currentSheetId, title: sheet.name.substring(0, 100) },
                 fields: 'title'
               }
             })
           }
         } else {
-          // Добавляем новые листы
-          initRequests.push({
+          requests.push({
             addSheet: {
-              properties: {
-                title: sheet.name.substring(0, 100)
-              }
+              properties: { title: sheet.name.substring(0, 100) }
             }
           })
         }
+        sheetIds.push(currentSheetId)
       })
 
-      // Этап А: Создаем листы и переименовываем
-      if (initRequests.length > 0) {
+      // Этап А: Создаем недостающие листы и переименовываем первый
+      if (requests.length > 0) {
         const initRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
           {
@@ -304,7 +286,7 @@ export default function App() {
               'Authorization': `Bearer ${accessToken}`,
               'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ requests: initRequests })
+            body: JSON.stringify({ requests })
           }
         )
         
@@ -314,77 +296,75 @@ export default function App() {
         }
 
         const initData = await initRes.json()
-        // Получаем ID созданных листов
-        let replyIdx = 0
+        const createdReplies = initData.replies
+        let replyIndex = 0
+        
         excelData.sheets.forEach((sheet, index) => {
           if (index === 0) {
-            sheetIds[index] = firstSheetId
+             sheetIds[index] = firstSheetId
           } else {
-            const reply = initData.replies[replyIdx]
-            if (reply && reply.addSheet && reply.addSheet.properties) {
-              sheetIds[index] = reply.addSheet.properties.sheetId
-            }
-            replyIdx++
+             const reply = createdReplies[replyIndex]
+             if (reply && reply.addSheet && reply.addSheet.properties) {
+               sheetIds[index] = reply.addSheet.properties.sheetId
+             }
+             replyIndex++
           }
         })
+      } else {
+        sheetIds[0] = firstSheetId
       }
 
-      // Этап Б: Заполнение данными
+      // Этап Б: Заполняем данные по всем листам
       const fillRequests = []
       
       excelData.sheets.forEach((sheet, index) => {
         const currentSheetId = sheetIds[index]
         const rowData = sheet.data
         
-        if (!rowData || rowData.length === 0) return
-
-        const maxCols = rowData[0].length // Мы уже выровняли матрицу
-        
-        // Формируем строки для API
-        const apiRows = rowData.map(row => {
-          return {
-            values: row.map(cell => {
-              // Определяем тип значения для Google API
-              if (cell === "" || cell === null || cell === undefined) {
-                return {} // Пустая ячейка
-              }
-              
-              const numVal = Number(cell)
-              // Если это число и строка не слишком длинная (не текст случайно), считаем числом
-              // Но надежнее отправлять как строку, если мы использовали raw: false при чтении
-              // Однако для чисел лучше numberValue
-              if (!isNaN(numVal) && cell.trim() !== "" && String(numVal).length === cell.trim().length) {
-                 return { userEnteredValue: { numberValue: numVal } }
-              }
-              
-              if (cell.toLowerCase() === 'true') return { userEnteredValue: { boolValue: true } }
-              if (cell.toLowerCase() === 'false') return { userEnteredValue: { boolValue: false } }
-              
-              // По умолчанию строка
-              return { userEnteredValue: { stringValue: cell } }
-            })
-          }
-        })
-
-        fillRequests.push({
-          updateCells: {
-            range: {
-              sheetId: currentSheetId,
-              startRowIndex: 0,
-              endRowIndex: rowData.length,
-              startColumnIndex: 0,
-              endColumnIndex: maxCols
-            },
-            rows: apiRows,
-            fields: 'userEnteredValue'
-          }
-        })
+        if (rowData && rowData.length > 0) {
+          // Находим максимальную ширину строки
+          const maxCols = Math.max(...rowData.map(r => (r ? r.length : 0)), 1)
+          
+          fillRequests.push({
+            updateCells: {
+              range: {
+                sheetId: currentSheetId,
+                startRowIndex: 0,
+                endRowIndex: rowData.length,
+                startColumnIndex: 0,
+                endColumnIndex: maxCols
+              },
+              rows: rowData.map(row => {
+                if (!row) return { values: [] }
+                // Убедимся, что длина строки равна maxCols
+                const paddedRow = [...row]
+                while(paddedRow.length < maxCols) paddedRow.push("")
+                
+                return {
+                  values: paddedRow.map(cell => {
+                    if (cell === null || cell === undefined || cell === '') {
+                      return {}
+                    }
+                    if (typeof cell === 'number') {
+                      return { userEnteredValue: { numberValue: cell } }
+                    }
+                    if (typeof cell === 'boolean') {
+                      return { userEnteredValue: { boolValue: cell } }
+                    }
+                    if (cell instanceof Date) {
+                       return { userEnteredValue: { stringValue: cell.toISOString().split('T')[0] } }
+                    }
+                    return { userEnteredValue: { stringValue: String(cell) } }
+                  })
+                }
+              }),
+              fields: 'userEnteredValue'
+            }
+          })
+        }
       })
 
       if (fillRequests.length > 0) {
-        // Разбиваем на пакеты, если данных очень много (лимит 100 запросов на batchUpdate, но у нас 1 запрос на лист)
-        // Если листов много, можно группировать, но обычно листов немного.
-        
         const updateRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
           {
@@ -397,9 +377,9 @@ export default function App() {
           }
         )
         
-        if (!updateRes.ok) {
-          const updateErr = await updateRes.json()
-          throw new Error("Ошибка записи данных: " + (updateErr.error?.message || 'Unknown'))
+        const updateData = await updateRes.json()
+        if (updateData.error) {
+          console.warn("Warning during data update:", updateData.error)
         }
       }
 
@@ -415,20 +395,6 @@ export default function App() {
     } finally {
       setIsCreating(false)
     }
-  }
-
-  const downloadExcel = () => {
-    if (!excelData || !excelData.sheets) return
-    
-    const wb = XLSX.utils.book_new()
-    
-    excelData.sheets.forEach(sheet => {
-      // Создаем новый лист из наших очищенных данных
-      const ws = XLSX.utils.aoa_to_sheet(sheet.data)
-      XLSX.utils.book_append_sheet(wb, ws, sheet.name)
-    })
-    
-    XLSX.writeFile(wb, fileName.replace('.xlsx', '_processed.xlsx'))
   }
 
   const resetApp = () => {
@@ -558,7 +524,7 @@ export default function App() {
               )}
               
               {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
-              <button onClick={createGoogleSheet} disabled={isCreating || !excelData} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
+              <button onClick={createGoogleSheet} disabled={isCreating} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md">
                 {isCreating ? <><RefreshIcon className="animate-spin mr-2" /> Создание...</> : <><SheetIcon className="mr-2" /> Создать таблицу</>}
               </button>
             </div>
@@ -574,10 +540,10 @@ export default function App() {
               
               <div className="flex flex-col sm:flex-row gap-4 justify-center mb-4">
                 <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md">
-                  <GoogleIcon className="mr-2" /> Открыть в Google <ArrowRightIcon className="ml-2 w-4 h-4"/>
+                  <GoogleIcon className="mr-2" /> Открыть Google Таблицу <ArrowRightIcon className="ml-2 w-4 h-4"/>
                 </a>
                 
-                <button onClick={downloadExcel} className="inline-flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md">
+                <button onClick={downloadExcel} className="inline-flex items-center justify-center bg-green-600 hover:bg-green-700 text-white font-medium py-3 px-6 rounded-lg transition-colors shadow-md">
                   <DownloadIcon className="mr-2" /> Скачать Excel
                 </button>
               </div>
